@@ -53,6 +53,9 @@ Options:
                           SHA-512). Default is MD5.
   -d, --db=<path>         Optional file path for persistent H2 database.
                           Defaults to an in-memory database.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                          Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+                          Default is WARN.
   -q, --quiet             Suppress per-file progress output during directory
                           scan.
   --duplicates-only       Only query and print files that have duplicate
@@ -109,10 +112,16 @@ Save the snapshot and fingerprints to a persistent H2 database on disk instead o
 ```
 *(This creates an H2 database file at `/tmp/my_boveda_vault.mv.db`.)*
 
-### 8. Combined Options
-Scan quietly using SHA-256 and only output duplicates:
+### 8. Enable Debug SQL Logging
+By default, Exposed database queries are suppressed (log level is `WARN`, routed to stderr). To view all executed SQL queries in `stderr`, pass `--log-level=DEBUG`:
 ```bash
-./gradlew run --args="-q -a SHA-256 --duplicates-only /path/to/my/photos"
+./gradlew run --args="--log-level=DEBUG /path/to/my/documents"
+```
+
+### 9. Combined Options
+Scan quietly using SHA-256 with debug logging to stderr, only showing duplicates:
+```bash
+./gradlew run --args="-q -a SHA-256 -l DEBUG --duplicates-only /path/to/my/photos"
 ```
 
 ---
@@ -155,21 +164,26 @@ erDiagram
 ## Project Structure
 
 ```text
-src/main/kotlin/com/cherba29/boveda/
-├── Main.kt                     # Clikt CLI command & application entry point
-├── hash/
-│   └── FileHasher.kt           # Streamed cryptographic hashing (FileHasher, MessageDigestFileHasher)
-├── scanner/
-│   ├── ScannedFile.kt          # Discovered file metadata model
-│   └── DirectoryScanner.kt     # Recursive filesystem traverser (FileTreeDirectoryScanner)
-├── model/
-│   └── FileRecords.kt          # Database query DTOs (FileRecord, FileRecordWithDuplicateRank)
-├── db/
-│   ├── Tables.kt               # Exposed table definitions (RepoSnapshots, RepoFiles, RepoFileInstances)
-│   ├── Entities.kt             # Exposed DAO entities (RepoSnapshot, RepoFile, RepoFileInstance)
-│   └── DatabaseFactory.kt      # H2 connection helpers & schema initializers
-└── service/
-    └── BovedaService.kt        # Coordination service for scanning, persistence, and queries
+src/main/
+├── resources/
+│   └── logback.xml             # Logback configuration directing WARN/ERROR logs to stderr
+└── kotlin/com/cherba29/boveda/
+    ├── Main.kt                 # Clikt CLI command & application entry point
+    ├── hash/
+    │   └── FileHasher.kt       # Streamed cryptographic hashing (FileHasher, MessageDigestFileHasher)
+    ├── logging/
+    │   └── LoggingConfig.kt    # Logback runtime level configuration
+    ├── scanner/
+    │   ├── ScannedFile.kt      # Discovered file metadata model
+    │   └── DirectoryScanner.kt # Recursive filesystem traverser (FileTreeDirectoryScanner)
+    ├── model/
+    │   └── FileRecords.kt      # Database query DTOs (FileRecord, FileRecordWithDuplicateRank)
+    ├── db/
+    │   ├── Tables.kt           # Exposed table definitions (RepoSnapshots, RepoFiles, RepoFileInstances)
+    │   ├── Entities.kt         # Exposed DAO entities (RepoSnapshot, RepoFile, RepoFileInstance)
+    │   └── DatabaseFactory.kt  # H2 connection helpers & schema initializers
+    └── service/
+        └── BovedaService.kt    # Coordination service for scanning, persistence, and queries
 ```
 
 ---

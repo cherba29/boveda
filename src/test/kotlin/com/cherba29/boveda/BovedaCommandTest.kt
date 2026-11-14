@@ -1,15 +1,26 @@
 package com.cherba29.boveda
 
+import ch.qos.logback.classic.Level
+import com.cherba29.boveda.logging.LoggingConfig
 import com.github.ajalt.clikt.testing.test
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.nio.file.Files
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class BovedaCommandTest {
+
+    @AfterTest
+    fun tearDown() {
+        LoggingConfig.setRootLevel(Level.WARN)
+    }
 
     @Test
     fun `help flag displays usage, parameters, and options`() {
@@ -21,6 +32,7 @@ class BovedaCommandTest {
         assertTrue(result.output.contains("<directory>"))
         assertTrue(result.output.contains("--algorithm"))
         assertTrue(result.output.contains("--db"))
+        assertTrue(result.output.contains("--log-level"))
         assertTrue(result.output.contains("--quiet"))
         assertTrue(result.output.contains("--duplicates-only"))
     }
@@ -76,6 +88,63 @@ class BovedaCommandTest {
         } finally {
             tempDir.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun `log-level DEBUG flag configures root logger and logs Exposed queries to stderr`() {
+        val tempDir = Files.createTempDirectory("clikt-log-debug-test")
+        val originalErr = System.err
+        val errStream = ByteArrayOutputStream()
+
+        try {
+            System.setErr(PrintStream(errStream))
+            tempDir.resolve("file.txt").writeText("data")
+
+            val command = BovedaCommand()
+            val result = command.test(listOf("--log-level", "DEBUG", tempDir.toString()))
+
+            assertEquals(0, result.statusCode)
+            assertEquals(Level.DEBUG, LoggingConfig.getRootLevel())
+
+            val stderrText = errStream.toString()
+            assertTrue(stderrText.contains("DEBUG Exposed"))
+        } finally {
+            System.setErr(originalErr)
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `log-level WARN default suppresses Exposed queries from stderr`() {
+        val tempDir = Files.createTempDirectory("clikt-log-warn-test")
+        val originalErr = System.err
+        val errStream = ByteArrayOutputStream()
+
+        try {
+            System.setErr(PrintStream(errStream))
+            tempDir.resolve("file.txt").writeText("data")
+
+            val command = BovedaCommand()
+            val result = command.test(tempDir.toString())
+
+            assertEquals(0, result.statusCode)
+            assertEquals(Level.WARN, LoggingConfig.getRootLevel())
+
+            val stderrText = errStream.toString()
+            assertFalse(stderrText.contains("DEBUG Exposed"))
+        } finally {
+            System.setErr(originalErr)
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `invalid log-level fails with non-zero exit code`() {
+        val command = BovedaCommand()
+        val result = command.test(listOf("--log-level", "INVALID_LEVEL"))
+
+        assertNotEquals(0, result.statusCode)
+        assertTrue(result.output.contains("invalid choice: INVALID_LEVEL"))
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.cherba29.boveda
 
+import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.db.RepoFile
 import com.cherba29.boveda.db.RepoFileInstance
@@ -11,6 +12,7 @@ import com.cherba29.boveda.db.ReportSnapshot
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import com.cherba29.boveda.hash.computeFileHash
+import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
@@ -23,6 +25,7 @@ import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.path
 import java.io.File
 import java.nio.file.Path
@@ -70,6 +73,20 @@ class BovedaCommand(
         help = "Optional file path for persistent H2 database. Defaults to an in-memory database."
     ).path(canBeFile = true, canBeDir = false)
 
+    val logLevel: Level by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE). Default is WARN."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    ).default(Level.WARN)
+
     val quiet: Boolean by option(
         "-q", "--quiet",
         help = "Suppress per-file progress output during directory scan."
@@ -81,6 +98,9 @@ class BovedaCommand(
     ).flag(default = false)
 
     override fun run() {
+        // Configure logging level from command-line argument
+        LoggingConfig.setRootLevel(logLevel)
+
         val repoDb = if (dbPath != null) {
             DatabaseFactory.connectFile(dbPath.toString())
         } else {
