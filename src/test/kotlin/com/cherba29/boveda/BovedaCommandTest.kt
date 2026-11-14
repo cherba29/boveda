@@ -56,7 +56,7 @@ class BovedaCommandTest {
     }
 
     @Test
-    fun `quiet flag suppresses file progress during scanning`() {
+    fun `quiet flag suppresses per-file logging and outputs progress indicator with ingestion speed`() {
         val tempDir = Files.createTempDirectory("clikt-quiet-test")
         try {
             tempDir.resolve("fileA.txt").writeText("content A")
@@ -66,8 +66,34 @@ class BovedaCommandTest {
 
             assertEquals(0, result.statusCode)
             assertTrue(result.output.contains("Scanning directory: $tempDir"))
+            // Progress indicator shows files processed and speeds
+            assertTrue(result.output.contains("Scanned 1 file"))
+            assertTrue(result.output.contains("files/s"))
+            assertTrue(result.output.contains("MB/s"))
             // Query results are still printed
             assertTrue(result.output.contains("### ==== Selecting from DB ==== ###"))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `quiet flag in interactive terminal displays animated progress indicator`() {
+        val tempDir = Files.createTempDirectory("clikt-quiet-interactive-test")
+        try {
+            tempDir.resolve("file1.txt").writeText("file 1 content")
+            tempDir.resolve("file2.txt").writeText("file 2 content")
+
+            val command = BovedaCommand()
+            val result = command.test(
+                listOf("--quiet", tempDir.toString()),
+                outputInteractive = true,
+                ansiLevel = com.github.ajalt.mordant.rendering.AnsiLevel.TRUECOLOR
+            )
+
+            assertEquals(0, result.statusCode)
+            assertTrue(result.output.contains("files/s"))
+            assertTrue(result.output.contains("MB/s"))
         } finally {
             tempDir.toFile().deleteRecursively()
         }

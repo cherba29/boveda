@@ -13,6 +13,9 @@ import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import com.cherba29.boveda.hash.computeFileHash
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.progress.MordantScanProgressIndicator
+import com.cherba29.boveda.progress.ScanProgressIndicator
+import com.cherba29.boveda.progress.ScanProgressState
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
@@ -20,6 +23,7 @@ import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.main
+import com.github.ajalt.clikt.core.terminal
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.options.default
@@ -43,14 +47,19 @@ typealias RepoFileInstance = com.cherba29.boveda.db.RepoFileInstance
 typealias DuplicateStatistics = com.cherba29.boveda.model.DuplicateStatistics
 typealias DuplicateGroup = com.cherba29.boveda.model.DuplicateGroup
 typealias PercentileBucket = com.cherba29.boveda.model.PercentileBucket
+typealias ScanProgressIndicator = com.cherba29.boveda.progress.ScanProgressIndicator
+typealias MordantScanProgressIndicator = com.cherba29.boveda.progress.MordantScanProgressIndicator
+typealias ScanProgressState = com.cherba29.boveda.progress.ScanProgressState
 
 /**
  * Clikt command line interface for Boveda vault operations.
  *
  * @param serviceFactory Optional factory to supply custom [BovedaService] (useful for testing or custom configuration).
+ * @param progressIndicatorFactory Optional factory to supply custom [ScanProgressIndicator] (useful for testing).
  */
 class BovedaCommand(
-    private val serviceFactory: ((Database) -> BovedaService)? = null
+    private val serviceFactory: ((Database) -> BovedaService)? = null,
+    private val progressIndicatorFactory: ((com.github.ajalt.mordant.terminal.Terminal) -> ScanProgressIndicator)? = null
 ) : CliktCommand(
     name = "boveda"
 ) {
@@ -115,11 +124,23 @@ class BovedaCommand(
 
         val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
 
+        val progressIndicator: ScanProgressIndicator? = if (quiet) {
+            progressIndicatorFactory?.invoke(terminal) ?: MordantScanProgressIndicator(terminal)
+        } else {
+            null
+        }
+
         echo("Scanning directory: $directory")
-        val snapshot = service.scanAndRecord(directory, algorithm = algorithm) { file ->
-            if (!quiet) {
-                echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
+        val snapshot = try {
+            service.scanAndRecord(directory, algorithm = algorithm) { file ->
+                if (!quiet) {
+                    echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
+                } else {
+                    progressIndicator?.onFileProcessed(file)
+                }
             }
+        } finally {
+            progressIndicator?.finish()
         }
 
         if (duplicatesOnly) {

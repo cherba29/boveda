@@ -11,6 +11,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **Content-Addressable Storage**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files.
 - **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across the directory tree.
 - **Duplication & Storage Statistics**: When running with `--duplicates-only`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 largest duplicate groups, 10% percentile decile buckets of file size distribution, and total elapsed processing time.
+- **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
 - **Rich CLI with Clikt**: Structured command-line argument parsing with path validation, custom hashing algorithm selection, quiet mode, persistent database options, and duplicate filtering.
 - **Flexible Storage**: Supports both in-memory H2 databases for transient runs and persistent file-backed databases for long-term tracking.
 
@@ -142,10 +143,18 @@ P90 - P100           25.40 MB - 25.40 MB            14     112.50 MB      56.25 
 ================================================================================
 ```
 
-### 6. Quiet Mode (Suppress Live Progress)
-Suppress per-file stdout progress during traversal and only print the database query results:
+### 6. Quiet Mode with Mordant Progress Indicator
+Suppress per-file logging during scan and display an animated Mordant progress indicator with processed file counts and average ingestion speeds (files/second and MB/second):
 ```bash
 ./gradlew run --args="--quiet /path/to/my/documents"
+```
+During scanning, a live progress indicator is displayed:
+```text
+⠋ Scanning & ingesting: 1,420 files (115.4 files/s, 24.50 MB/s) 0:00:12
+```
+Upon completion, the final ingestion summary is printed:
+```text
+✔ Scanned 1,420 files (450.20 MB) in 12.30s (115.4 files/s, 24.50 MB/s)
 ```
 
 ### 7. Persist to a Database File
@@ -217,8 +226,10 @@ src/main/
     ├── logging/
     │   └── LoggingConfig.kt    # Logback runtime level configuration
     ├── scanner/
-    │   ├── ScannedFile.kt      # Discovered file metadata model
-    │   └── DirectoryScanner.kt # Recursive filesystem traverser (FileTreeDirectoryScanner)
+    │   ├── ScannedFile.kt          # Discovered file metadata model
+    │   └── DirectoryScanner.kt     # Recursive filesystem traverser (FileTreeDirectoryScanner)
+    ├── progress/
+    │   └── ScanProgressIndicator.kt # Mordant progress indicator & ingestion speed metrics
     ├── model/
     │   ├── FileRecords.kt          # Database query DTOs (FileRecord, FileRecordWithDuplicateRank)
     │   └── DuplicateStatistics.kt  # Duplicate statistics, percentile deciles, and formatters
