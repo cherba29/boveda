@@ -6,6 +6,7 @@ plugins {
   kotlin("plugin.serialization") version "2.2.20"
   id("org.jetbrains.kotlinx.kover") version "0.7.0"
   id("io.kotest") version "6.0.7"
+  alias(libs.plugins.graalvm.native)
   application
 }
 
@@ -54,6 +55,16 @@ dependencies {
 application {
   // Define the main class for the application.
   mainClass = "com.cherba29.boveda.MainKt"
+}
+
+graalvmNative {
+  binaries {
+    named("main") {
+      imageName.set("boveda")
+      mainClass.set("com.cherba29.boveda.MainKt")
+      buildArgs.add("--no-fallback")
+    }
+  }
 }
 
 tasks.withType<Test>().configureEach {

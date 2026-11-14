@@ -13,6 +13,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **Duplication & Storage Statistics**: When running with `--duplicates-only`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 largest duplicate groups, 10% percentile decile buckets of file size distribution, and total elapsed processing time.
 - **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
 - **Rich CLI with Clikt**: Structured command-line argument parsing with path validation, custom hashing algorithm selection, quiet mode, persistent database options, and duplicate filtering.
+- **GraalVM Native Image Ready**: Configured with GraalVM Native Build Tools to compile into a fast, standalone native binary without JVM startup overhead.
 - **Flexible Storage**: Supports both in-memory H2 databases for transient runs and persistent file-backed databases for long-term tracking.
 
 ---
@@ -37,6 +38,15 @@ Build the project and run the test suite:
 
 # Run verification and Kover code coverage checks
 ./gradlew check
+
+# Build standalone GraalVM Native Image executable
+./gradlew nativeCompile
+
+# Run the compiled native binary directly
+./build/native/nativeCompile/boveda --help
+
+# Or compile and run directly with Gradle
+./gradlew nativeRun --args="--help"
 ```
 
 ---
