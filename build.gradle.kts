@@ -53,7 +53,11 @@ dependencies {
 
 application {
   // Define the main class for the application.
-  mainClass = "MainKt"
+  mainClass = "com.cherba29.boveda.MainKt"
+}
+
+tasks.withType<Test>().configureEach {
+  useJUnitPlatform()
 }
 
 koverReport {
