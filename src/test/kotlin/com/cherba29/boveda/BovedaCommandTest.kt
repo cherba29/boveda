@@ -35,6 +35,8 @@ class BovedaCommandTest {
         assertTrue(result.output.contains("--log-level"))
         assertTrue(result.output.contains("--quiet"))
         assertTrue(result.output.contains("--duplicates-only"))
+        assertTrue(result.output.contains("--batch-size"))
+        assertTrue(result.output.contains("--no-cache-warmup"))
     }
 
     @Test
@@ -262,6 +264,45 @@ class BovedaCommandTest {
             assertTrue(result.output.contains("is a file"))
         } finally {
             Files.deleteIfExists(tempFile)
+        }
+    }
+
+    @Test
+    fun `batch-size option executes scan and records files in custom batch sizes`() {
+        val tempDir = Files.createTempDirectory("clikt-batch-test")
+        try {
+            tempDir.resolve("f1.txt").writeText("content 1")
+            tempDir.resolve("f2.txt").writeText("content 2")
+            tempDir.resolve("f3.txt").writeText("content 3")
+
+            val command = BovedaCommand()
+            val result = command.test(listOf("--batch-size", "2", tempDir.toString()))
+
+            assertEquals(0, result.statusCode)
+            assertTrue(result.output.contains("Scanning directory: $tempDir"))
+            assertTrue(result.output.contains("### ==== Selecting from DB ==== ###"))
+            assertTrue(result.output.contains("f1.txt"))
+            assertTrue(result.output.contains("f2.txt"))
+            assertTrue(result.output.contains("f3.txt"))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `no-cache-warmup flag executes without error`() {
+        val tempDir = Files.createTempDirectory("clikt-no-warmup-test")
+        try {
+            tempDir.resolve("file.txt").writeText("data")
+
+            val command = BovedaCommand()
+            val result = command.test(listOf("--no-cache-warmup", tempDir.toString()))
+
+            assertEquals(0, result.statusCode)
+            assertTrue(result.output.contains("Scanning directory: $tempDir"))
+            assertTrue(result.output.contains("file.txt"))
+        } finally {
+            tempDir.toFile().deleteRecursively()
         }
     }
 }

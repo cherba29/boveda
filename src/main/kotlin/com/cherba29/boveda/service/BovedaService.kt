@@ -1,5 +1,8 @@
 package com.cherba29.boveda.service
 
+import com.cherba29.boveda.cache.DeduplicationCache
+import com.cherba29.boveda.cache.FileContentKey
+import com.cherba29.boveda.cache.InMemoryDeduplicationCache
 import com.cherba29.boveda.db.RepoFile
 import com.cherba29.boveda.db.RepoFileInstance
 import com.cherba29.boveda.db.RepoFileInstances
@@ -23,9 +26,12 @@ import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.time.Duration
 import org.jetbrains.exposed.v1.core.alias
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.dao.id.EntityID
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.rowNumber
 import org.jetbrains.exposed.v1.jdbc.Database
+import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
@@ -35,12 +41,22 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
  * @property database The Exposed [Database] instance.
  * @property scanner The [DirectoryScanner] for traversing files.
  * @property deduplicateFiles Whether files with identical hash and size share a single [RepoFile] record.
+ * @property batchSize Number of files to batch per database transaction during scanning.
+ * @property cache The [DeduplicationCache] storing `(size, hash) -> file_id` mappings.
+ * @property warmUpCache Whether to pre-warm the cache from [RepoFiles] on startup / scanning.
  */
 class BovedaService(
     private val database: Database,
     private val scanner: DirectoryScanner = FileTreeDirectoryScanner(),
-    private val deduplicateFiles: Boolean = true
+    private val deduplicateFiles: Boolean = true,
+    val batchSize: Int = DEFAULT_BATCH_SIZE,
+    val cache: DeduplicationCache = InMemoryDeduplicationCache(),
+    private val warmUpCache: Boolean = true
 ) {
+
+    companion object {
+        const val DEFAULT_BATCH_SIZE = 1000
+    }
 
     /**
      * Initializes a new directory snapshot in the database.
@@ -57,11 +73,19 @@ class BovedaService(
      */
     fun recordFile(snapshot: RepoSnapshot, scannedFile: ScannedFile): RepoFileInstance = transaction(database) {
         val repoFile = if (deduplicateFiles) {
-            RepoFile.find {
-                (RepoFiles.hash eq scannedFile.hash) and (RepoFiles.size eq scannedFile.size)
-            }.firstOrNull() ?: RepoFile.new {
-                size = scannedFile.size
-                hash = scannedFile.hash
+            val cachedId = cache.get(scannedFile.size, scannedFile.hash)
+            if (cachedId != null) {
+                RepoFile[cachedId]
+            } else {
+                val found = RepoFile.find {
+                    (RepoFiles.hash eq scannedFile.hash) and (RepoFiles.size eq scannedFile.size)
+                }.firstOrNull()
+                val file = found ?: RepoFile.new {
+                    size = scannedFile.size
+                    hash = scannedFile.hash
+                }
+                cache.put(scannedFile.size, scannedFile.hash, file.id)
+                file
             }
         } else {
             RepoFile.new {
@@ -78,6 +102,104 @@ class BovedaService(
     }
 
     /**
+     * Ingests a batch of [ScannedFile]s under [snapshot] in a single transaction,
+     * utilizing the in-memory cache and batch inserts for high throughput.
+     */
+    fun recordBatch(snapshot: RepoSnapshot, batch: List<ScannedFile>) {
+        if (batch.isEmpty()) return
+
+        transaction(database) {
+            if (!deduplicateFiles) {
+                val insertedFiles = RepoFiles.batchInsert(batch, shouldReturnGeneratedValues = true) { file ->
+                    this[RepoFiles.size] = file.size
+                    this[RepoFiles.hash] = file.hash
+                }
+                val instances = batch.zip(insertedFiles)
+                RepoFileInstances.batchInsert(instances, shouldReturnGeneratedValues = false) { (file, fileRow) ->
+                    this[RepoFileInstances.snapshot] = snapshot.id
+                    this[RepoFileInstances.file] = fileRow[RepoFiles.id]
+                    this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
+                }
+                return@transaction
+            }
+
+            // Deduplication enabled:
+            // 1. Identify files missing from the in-memory cache (increments hits/misses)
+            val missingFromCache = batch.filter { cache.get(it.size, it.hash) == null }
+
+            if (missingFromCache.isNotEmpty()) {
+                val uniqueMissing = missingFromCache.distinctBy { FileContentKey(it.size, it.hash) }
+
+                // Check if any missing files exist in DB (e.g. if cache was not pre-warmed)
+                val missingHashes = uniqueMissing.map { it.hash }.distinct()
+                val existingInDb = mutableMapOf<FileContentKey, EntityID<Int>>()
+                for (chunk in missingHashes.chunked(500)) {
+                    RepoFiles.select(RepoFiles.id, RepoFiles.size, RepoFiles.hash)
+                        .where { RepoFiles.hash inList chunk }
+                        .forEach { row ->
+                            val key = FileContentKey(row[RepoFiles.size], row[RepoFiles.hash])
+                            existingInDb[key] = row[RepoFiles.id]
+                        }
+                }
+
+                for ((key, entityId) in existingInDb) {
+                    cache.put(key.size, key.hash, entityId)
+                }
+
+                // Brand new files not in cache or DB
+                val brandNewFiles = uniqueMissing.filter { !cache.contains(it.size, it.hash) }
+                if (brandNewFiles.isNotEmpty()) {
+                    val insertedRows = RepoFiles.batchInsert(brandNewFiles, shouldReturnGeneratedValues = true) { file ->
+                        this[RepoFiles.size] = file.size
+                        this[RepoFiles.hash] = file.hash
+                    }
+                    for (row in insertedRows) {
+                        cache.put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
+                    }
+                }
+            }
+
+            // 2. All files are guaranteed to be in cache. Batch insert instances.
+            RepoFileInstances.batchInsert(batch, shouldReturnGeneratedValues = false) { file ->
+                val entityId = cache.peek(file.size, file.hash)
+                    ?: error("Cache must contain file id for hash ${file.hash} and size ${file.size}")
+                this[RepoFileInstances.snapshot] = snapshot.id
+                this[RepoFileInstances.file] = entityId
+                this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
+            }
+        }
+    }
+
+    /**
+     * Records a sequence of [files] under [snapshot] in batches of [batchSize].
+     */
+    fun recordFiles(
+        snapshot: RepoSnapshot,
+        files: Sequence<ScannedFile>
+    ) {
+        val buffer = ArrayList<ScannedFile>(batchSize)
+        for (file in files) {
+            buffer.add(file)
+            if (buffer.size >= batchSize) {
+                recordBatch(snapshot, buffer)
+                buffer.clear()
+            }
+        }
+        if (buffer.isNotEmpty()) {
+            recordBatch(snapshot, buffer)
+            buffer.clear()
+        }
+    }
+
+    /**
+     * Records an iterable collection of [files] under [snapshot] in batches of [batchSize].
+     */
+    fun recordFiles(
+        snapshot: RepoSnapshot,
+        files: Iterable<ScannedFile>
+    ) = recordFiles(snapshot, files.asSequence())
+
+    /**
      * Marks [snapshot] as completed.
      */
     fun completeSnapshot(snapshot: RepoSnapshot) = transaction(database) {
@@ -85,20 +207,24 @@ class BovedaService(
     }
 
     /**
-     * Scans [rootPath], records each discovered file in the database, and marks the snapshot complete.
+     * Scans [rootPath], records each discovered file in the database in batches, and marks the snapshot complete.
      */
     fun scanAndRecord(
         rootPath: Path,
         algorithm: String = "MD5",
         onFileScanned: ((ScannedFile) -> Unit)? = null
     ): RepoSnapshot {
-        val snapshot = createSnapshot(rootPath)
-
-        scanner.scan(rootPath, algorithm).forEach { scannedFile ->
-            onFileScanned?.invoke(scannedFile)
-            recordFile(snapshot, scannedFile)
+        if (deduplicateFiles && warmUpCache) {
+            cache.warmUp(database)
         }
 
+        val snapshot = createSnapshot(rootPath)
+
+        val scannedFiles = scanner.scan(rootPath, algorithm).onEach { file ->
+            onFileScanned?.invoke(file)
+        }
+
+        recordFiles(snapshot, scannedFiles)
         completeSnapshot(snapshot)
         return snapshot
     }

@@ -30,6 +30,7 @@ import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.choice
+import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import java.io.File
 import java.nio.file.Path
@@ -47,6 +48,10 @@ typealias RepoFileInstance = com.cherba29.boveda.db.RepoFileInstance
 typealias DuplicateStatistics = com.cherba29.boveda.model.DuplicateStatistics
 typealias DuplicateGroup = com.cherba29.boveda.model.DuplicateGroup
 typealias PercentileBucket = com.cherba29.boveda.model.PercentileBucket
+typealias DeduplicationCache = com.cherba29.boveda.cache.DeduplicationCache
+typealias InMemoryDeduplicationCache = com.cherba29.boveda.cache.InMemoryDeduplicationCache
+typealias FileContentKey = com.cherba29.boveda.cache.FileContentKey
+typealias CacheStatistics = com.cherba29.boveda.cache.CacheStatistics
 typealias ScanProgressIndicator = com.cherba29.boveda.progress.ScanProgressIndicator
 typealias MordantScanProgressIndicator = com.cherba29.boveda.progress.MordantScanProgressIndicator
 typealias ScanProgressState = com.cherba29.boveda.progress.ScanProgressState
@@ -110,6 +115,16 @@ class BovedaCommand(
         help = "Only query and print files that have duplicate contents."
     ).flag(default = false)
 
+    val batchSize: Int by option(
+        "-b", "--batch-size",
+        help = "Number of files to batch per database transaction during scanning. Default is 1000."
+    ).int().default(1000)
+
+    val noCacheWarmup: Boolean by option(
+        "--no-cache-warmup",
+        help = "Disable pre-warming the in-memory deduplication cache from the database on startup."
+    ).flag(default = false)
+
     override fun run() {
         val startTime = System.nanoTime()
 
@@ -122,7 +137,11 @@ class BovedaCommand(
             DatabaseFactory.connectInMemory("test")
         }
 
-        val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
+        val service = serviceFactory?.invoke(repoDb) ?: BovedaService(
+            database = repoDb,
+            batchSize = batchSize,
+            warmUpCache = !noCacheWarmup
+        )
 
         val progressIndicator: ScanProgressIndicator? = if (quiet) {
             progressIndicatorFactory?.invoke(terminal) ?: MordantScanProgressIndicator(terminal)

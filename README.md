@@ -8,7 +8,8 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 
 - **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
 - **Streaming Cryptographic Hashing**: Chunk-based hashing (MD5, SHA-256, SHA-512, etc.) that handles large files efficiently without loading them entirely into memory.
-- **Content-Addressable Storage**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files.
+- **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
+- **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
 - **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across the directory tree.
 - **Duplication & Storage Statistics**: When running with `--duplicates-only`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 largest duplicate groups, 10% percentile decile buckets of file size distribution, and total elapsed processing time.
 - **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
@@ -72,6 +73,10 @@ Options:
                           scan.
   --duplicates-only       Only query and print files that have duplicate
                           contents.
+  -b, --batch-size=<int>  Number of files to batch per database transaction
+                          during scanning. Default is 1000.
+  --no-cache-warmup       Disable pre-warming the in-memory deduplication cache
+                          from the database on startup.
   -h, --help              Show this message and exit
 
 Arguments:
@@ -180,10 +185,20 @@ By default, Exposed database queries are suppressed (log level is `WARN`, routed
 ./gradlew run --args="--log-level=DEBUG /path/to/my/documents"
 ```
 
-### 9. Combined Options
-Scan quietly using SHA-256 with debug logging to stderr, only showing duplicates:
+### 9. High-Throughput Batch Ingestion & Cache Tuning
+Configure batch size (number of file instances per database transaction) and cache behavior for scanning massive vaults:
 ```bash
-./gradlew run --args="-q -a SHA-256 -l DEBUG --duplicates-only /path/to/my/photos"
+./gradlew run --args="--batch-size 2000 --db /tmp/my_vault /path/to/my/documents"
+```
+On startup, Boveda automatically pre-warms its in-memory deduplication cache from the database so that previously scanned files are resolved with zero SQL queries. To disable pre-warming on memory-constrained systems, use `--no-cache-warmup`:
+```bash
+./gradlew run --args="--no-cache-warmup --db /tmp/my_vault /path/to/my/documents"
+```
+
+### 10. Combined Options
+Scan quietly using SHA-256 with debug logging to stderr, custom batch size of 2,000, only showing duplicates:
+```bash
+./gradlew run --args="-q -a SHA-256 -b 2000 -l DEBUG --duplicates-only /path/to/my/photos"
 ```
 
 ---
@@ -231,6 +246,8 @@ src/main/
 │   └── logback.xml             # Logback configuration directing WARN/ERROR logs to stderr
 └── kotlin/com/cherba29/boveda/
     ├── Main.kt                 # Clikt CLI command & application entry point
+    ├── cache/
+    │   └── DeduplicationCache.kt # In-memory deduplication cache & metrics
     ├── hash/
     │   └── FileHasher.kt       # Streamed cryptographic hashing (FileHasher, MessageDigestFileHasher)
     ├── logging/
