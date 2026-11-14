@@ -60,6 +60,14 @@ tasks.withType<Test>().configureEach {
   useJUnitPlatform()
 }
 
+tasks.test {
+  testLogging {
+    events("passed", "skipped", "failed")
+    // Optional: prints System.out/System.err
+    // showStandardStreams = true
+  }
+}
+
 koverReport {
   defaults {
     filters {

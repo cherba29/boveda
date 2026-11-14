@@ -169,16 +169,16 @@ class BovedaService(
     }
 
     /**
-     * Prints query results to stdout matching the original output format.
+     * Prints query results matching the original output format.
      */
-    fun printQueryResults(snapshotId: Int? = null) {
-        println("### ==== Selecting from DB ==== ###")
+    fun printQueryResults(snapshotId: Int? = null, out: (String) -> Unit = ::println) {
+        out("### ==== Selecting from DB ==== ###")
         queryFiles(snapshotId).forEach { record ->
-            println("snapshot=${record.snapshotId} size=${record.size} path=${record.path} hash=${record.hash}")
+            out("snapshot=${record.snapshotId} size=${record.size} path=${record.path} hash=${record.hash}")
         }
 
         queryFilesWithDuplicateRank(snapshotId).forEach { record ->
-            println("${record.snapshotId} ${record.size} ${record.path} ${record.duplicateRank} ${record.hash}")
+            out("${record.snapshotId} ${record.size} ${record.path} ${record.duplicateRank} ${record.hash}")
         }
     }
 }
