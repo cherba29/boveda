@@ -165,6 +165,14 @@ class BovedaCommandTest {
             assertTrue(result.output.contains("f2.txt"))
             // Unique file is not part of the duplicate group
             assertTrue(!result.output.contains("f3.txt"))
+
+            // Verify statistics summary is printed
+            assertTrue(result.output.contains("DUPLICATION SUMMARY"))
+            assertTrue(result.output.contains("Scan & Ingestion Statistics:"))
+            assertTrue(result.output.contains("Total Files Scanned:"))
+            assertTrue(result.output.contains("Top 10 Largest Duplicate Files:"))
+            assertTrue(result.output.contains("Percentile Buckets by File Size (10% Deciles):"))
+            assertTrue(result.output.contains("Total Processing Time:"))
         } finally {
             tempDir.toFile().deleteRecursively()
         }

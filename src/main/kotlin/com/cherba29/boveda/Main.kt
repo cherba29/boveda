@@ -30,6 +30,7 @@ import com.github.ajalt.clikt.parameters.types.path
 import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.Path
+import kotlin.time.Duration.Companion.nanoseconds
 import org.jetbrains.exposed.v1.jdbc.Database
 
 // Re-export core database declarations in com.cherba29.boveda for backward compatibility
@@ -39,6 +40,9 @@ typealias RepoFileInstances = com.cherba29.boveda.db.RepoFileInstances
 typealias ReportSnapshot = com.cherba29.boveda.db.ReportSnapshot
 typealias RepoFile = com.cherba29.boveda.db.RepoFile
 typealias RepoFileInstance = com.cherba29.boveda.db.RepoFileInstance
+typealias DuplicateStatistics = com.cherba29.boveda.model.DuplicateStatistics
+typealias DuplicateGroup = com.cherba29.boveda.model.DuplicateGroup
+typealias PercentileBucket = com.cherba29.boveda.model.PercentileBucket
 
 /**
  * Clikt command line interface for Boveda vault operations.
@@ -98,6 +102,8 @@ class BovedaCommand(
     ).flag(default = false)
 
     override fun run() {
+        val startTime = System.nanoTime()
+
         // Configure logging level from command-line argument
         LoggingConfig.setRootLevel(logLevel)
 
@@ -126,6 +132,11 @@ class BovedaCommand(
                     echo("snapshot=${record.snapshotId} size=${record.size} path=${record.path} rank=${record.duplicateRank} hash=${record.hash}")
                 }
             }
+
+            val elapsedNanos = System.nanoTime() - startTime
+            val duration = elapsedNanos.nanoseconds
+            val stats = service.computeDuplicateStatistics(snapshot.id.value, duration)
+            service.printDuplicateStatistics(stats) { echo(it) }
         } else {
             service.printQueryResults(snapshot.id.value) { echo(it) }
         }
