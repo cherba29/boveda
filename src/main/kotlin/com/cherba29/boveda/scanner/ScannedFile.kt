@@ -13,9 +13,9 @@ import java.nio.file.attribute.FileTime
  * @property lastModifiedTime The last modified timestamp of the file, if available.
  */
 data class ScannedFile(
-    val path: Path,
-    val relativePath: String,
-    val size: Long,
-    val hash: String,
-    val lastModifiedTime: FileTime? = null
+  val path: Path,
+  val relativePath: String,
+  val size: Long,
+  val hash: String,
+  val lastModifiedTime: FileTime? = null
 )

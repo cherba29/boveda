@@ -9,10 +9,10 @@ package com.cherba29.boveda.model
  * @property hash The content hash string.
  */
 data class FileRecord(
-    val snapshotId: Int,
-    val path: String,
-    val size: Long,
-    val hash: String
+  val snapshotId: Int,
+  val path: String,
+  val size: Long,
+  val hash: String
 )
 
 /**
@@ -25,11 +25,11 @@ data class FileRecord(
  * @property duplicateRank The 1-based row number partitioned by content hash. Ranks > 1 denote duplicates.
  */
 data class FileRecordWithDuplicateRank(
-    val snapshotId: Int,
-    val path: String,
-    val size: Long,
-    val hash: String,
-    val duplicateRank: Long
+  val snapshotId: Int,
+  val path: String,
+  val size: Long,
+  val hash: String,
+  val duplicateRank: Long
 )
 
 /**
@@ -42,9 +42,9 @@ data class FileRecordWithDuplicateRank(
  * @property totalBytes Total storage size in bytes across all files recorded under this snapshot.
  */
 data class SnapshotSummary(
-    val id: Int,
-    val rootPath: String,
-    val isCompleted: Boolean,
-    val fileCount: Long,
-    val totalBytes: Long
+  val id: Int,
+  val rootPath: String,
+  val isCompleted: Boolean,
+  val fileCount: Long,
+  val totalBytes: Long
 )

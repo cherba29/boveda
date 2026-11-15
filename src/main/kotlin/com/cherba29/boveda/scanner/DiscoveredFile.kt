@@ -12,8 +12,8 @@ import java.nio.file.attribute.FileTime
  * @property lastModifiedTime File modification timestamp, if available.
  */
 data class DiscoveredFile(
-    val path: Path,
-    val relativePath: String,
-    val size: Long,
-    val lastModifiedTime: FileTime? = null
+  val path: Path,
+  val relativePath: String,
+  val size: Long,
+  val lastModifiedTime: FileTime? = null
 )

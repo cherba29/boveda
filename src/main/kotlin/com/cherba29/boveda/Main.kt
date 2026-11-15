@@ -3,18 +3,13 @@ package com.cherba29.boveda
 import com.cherba29.boveda.cmds.BovedaCommand
 import com.cherba29.boveda.cmds.DbCommand
 import com.cherba29.boveda.cmds.ScanCommand
-import com.cherba29.boveda.cmds.connectDatabase
 import com.cherba29.boveda.cmds.db.PrintDuplicatesCommand
 import com.cherba29.boveda.cmds.db.SnapshotsCommand
 import com.cherba29.boveda.cmds.db.snapshots.DeleteCommand
 import com.cherba29.boveda.cmds.db.snapshots.DeleteSnapshotCommand
 import com.cherba29.boveda.cmds.db.snapshots.ListCommand
 import com.cherba29.boveda.cmds.db.snapshots.ListSnapshotsCommand
-import com.cherba29.boveda.cmds.resolveDatabasePath
-import com.cherba29.boveda.cmds.resolveSnapshot
-import com.cherba29.boveda.cmds.validateDatabaseFileExists
 import com.github.ajalt.clikt.core.main
-import java.nio.file.Path
 
 // Re-export core database declarations in com.cherba29.boveda for backward compatibility
 typealias RepoSnapshots = com.cherba29.boveda.db.RepoSnapshots
@@ -56,7 +51,7 @@ typealias DeleteSnapshotCommand = com.cherba29.boveda.cmds.db.snapshots.DeleteSn
  * @param args Command-line arguments parsed by [BovedaCommand].
  */
 fun main(args: Array<String>) {
-    BovedaCommand().main(args)
+  BovedaCommand().main(args)
 }
 
 /**

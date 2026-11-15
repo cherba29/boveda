@@ -1,0 +1,9 @@
+root = true
+
+[*.{kt,kts}]
+ktlint_code_style = android_studio
+indent_style = space
+indent_size = 2
+continuation_indent_size = 2
+ktlint_standard_filename = disabled
+ktlint_ignore_back_ticked_identifier = true

@@ -30,46 +30,63 @@ import kotlin.time.Duration.Companion.nanoseconds
  * @property timeProvider Supplier of current timestamp in nanoseconds (customizable for deterministic testing).
  */
 data class ScanProgressState(
-    val filesProcessed: Long = 0L,
-    val bytesProcessed: Long = 0L,
-    val startTimeNanos: Long = System.nanoTime(),
-    val action: String = "Scanning & ingesting:",
-    val timeProvider: () -> Long = { System.nanoTime() }
+  val filesProcessed: Long = 0L,
+  val bytesProcessed: Long = 0L,
+  val startTimeNanos: Long = System.nanoTime(),
+  val action: String = "Scanning & ingesting:",
+  val timeProvider: () -> Long = { System.nanoTime() }
 ) {
-    val elapsedNanos: Long
-        get() = (timeProvider() - startTimeNanos).coerceAtLeast(0L)
+  val elapsedNanos: Long
+    get() = (timeProvider() - startTimeNanos).coerceAtLeast(0L)
 
-    val elapsedSeconds: Double
-        get() = elapsedNanos / 1_000_000_000.0
+  val elapsedSeconds: Double
+    get() = elapsedNanos / 1_000_000_000.0
 
-    /** Average ingestion speed in files per second. */
-    val filesPerSecond: Double
-        get() = if (elapsedSeconds > 0.000001) filesProcessed / elapsedSeconds else 0.0
+  /** Average ingestion speed in files per second. */
+  val filesPerSecond: Double
+    get() = if (elapsedSeconds > 0.000001) filesProcessed / elapsedSeconds else 0.0
 
-    /** Average ingestion speed in megabytes per second (using binary megabyte: 1,048,576 bytes). */
-    val megaBytesPerSecond: Double
-        get() = if (elapsedSeconds > 0.000001) (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds else 0.0
+  /** Average ingestion speed in megabytes per second (using binary megabyte: 1,048,576 bytes). */
+  val megaBytesPerSecond: Double
+    get() = if (elapsedSeconds > 0.000001) {
+      (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds
+    } else {
+      0.0
+    }
 
-    /** Human-readable string representation of processed files. */
-    val formattedFiles: String
-        get() = if (filesProcessed == 1L) "1 file" else String.format(Locale.US, "%,d files", filesProcessed)
+  /** Human-readable string representation of processed files. */
+  val formattedFiles: String
+    get() = if (filesProcessed == 1L) {
+      "1 file"
+    } else {
+      String.format(
+        Locale.US,
+        "%,d files",
+        filesProcessed
+      )
+    }
 
-    /** Human-readable string representation of average ingestion speeds. */
-    val formattedSpeed: String
-        get() = String.format(Locale.US, "%.1f files/s, %.2f MB/s", filesPerSecond, megaBytesPerSecond)
+  /** Human-readable string representation of average ingestion speeds. */
+  val formattedSpeed: String
+    get() = String.format(
+      Locale.US,
+      "%.1f files/s, %.2f MB/s",
+      filesPerSecond,
+      megaBytesPerSecond
+    )
 }
 
 /**
  * Progress indicator interface for tracking file scan and database ingestion.
  */
 interface ScanProgressIndicator : AutoCloseable {
-    /** Called whenever a file has been discovered and processed. */
-    fun onFileProcessed(file: ScannedFile)
+  /** Called whenever a file has been discovered and processed. */
+  fun onFileProcessed(file: ScannedFile)
 
-    /** Finalizes progress reporting and displays the completed summary. */
-    fun finish()
+  /** Finalizes progress reporting and displays the completed summary. */
+  fun finish()
 
-    override fun close() = finish()
+  override fun close() = finish()
 }
 
 /**
@@ -83,93 +100,95 @@ interface ScanProgressIndicator : AutoCloseable {
  * @param timeProvider Clock provider returning nanoseconds, defaulting to [System.nanoTime].
  */
 class MordantScanProgressIndicator(
-    private val terminal: Terminal,
-    private val timeProvider: () -> Long = { System.nanoTime() }
+  private val terminal: Terminal,
+  private val timeProvider: () -> Long = { System.nanoTime() }
 ) : ScanProgressIndicator {
-    private val filesCount = AtomicLong(0)
-    private val bytesCount = AtomicLong(0)
-    private val startNanos = timeProvider()
-    private val finished = AtomicBoolean(false)
+  private val filesCount = AtomicLong(0)
+  private val bytesCount = AtomicLong(0)
+  private val startNanos = timeProvider()
+  private val finished = AtomicBoolean(false)
 
-    private val isInteractive: Boolean = terminal.terminalInfo.outputInteractive
-    private var executor: ExecutorService? = null
-    private var animator: ThreadProgressTaskAnimator<ScanProgressState>? = null
+  private val isInteractive: Boolean = terminal.terminalInfo.outputInteractive
+  private var executor: ExecutorService? = null
+  private var animator: ThreadProgressTaskAnimator<ScanProgressState>? = null
 
-    init {
-        if (isInteractive) {
-            val layout = progressBarContextLayout<ScanProgressState> {
-                spinner(Spinner.Dots())
-                text { "${context.action} " }
-                text { context.formattedFiles }
-                text { "(${context.formattedSpeed})" }
-                timeElapsed()
-            }
+  init {
+    if (isInteractive) {
+      val layout = progressBarContextLayout<ScanProgressState> {
+        spinner(Spinner.Dots())
+        text { "${context.action} " }
+        text { context.formattedFiles }
+        text { "(${context.formattedSpeed})" }
+        timeElapsed()
+      }
 
-            val exec = Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "boveda-progress-animator").apply { isDaemon = true }
-            }
-            this.executor = exec
+      val exec = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "boveda-progress-animator").apply { isDaemon = true }
+      }
+      this.executor = exec
 
-            val anim = layout.animateOnThread(
-                terminal = terminal,
-                context = currentState(),
-                maker = MultiProgressBarWidgetMaker
-            )
-            this.animator = anim
-            anim.execute(exec)
-        }
+      val anim = layout.animateOnThread(
+        terminal = terminal,
+        context = currentState(),
+        maker = MultiProgressBarWidgetMaker
+      )
+      this.animator = anim
+      anim.execute(exec)
     }
+  }
 
-    private fun currentState(action: String = "Scanning & ingesting:"): ScanProgressState {
-        return ScanProgressState(
-            filesProcessed = filesCount.get(),
-            bytesProcessed = bytesCount.get(),
-            startTimeNanos = startNanos,
-            action = action,
-            timeProvider = timeProvider
+  private fun currentState(action: String = "Scanning & ingesting:"): ScanProgressState {
+    return ScanProgressState(
+      filesProcessed = filesCount.get(),
+      bytesProcessed = bytesCount.get(),
+      startTimeNanos = startNanos,
+      action = action,
+      timeProvider = timeProvider
+    )
+  }
+
+  override fun onFileProcessed(file: ScannedFile) {
+    if (finished.get()) return
+    val count = filesCount.incrementAndGet()
+    val bytes = bytesCount.addAndGet(file.size)
+
+    if (isInteractive) {
+      animator?.update {
+        context = ScanProgressState(
+          filesProcessed = count,
+          bytesProcessed = bytes,
+          startTimeNanos = startNanos,
+          action = "Scanning & ingesting:",
+          timeProvider = timeProvider
         )
+      }
+    }
+  }
+
+  override fun finish() {
+    if (!finished.compareAndSet(false, true)) return
+
+    val state = currentState(action = "Scanned:")
+    val duration = (timeProvider() - startNanos).coerceAtLeast(0L).nanoseconds
+
+    if (isInteractive) {
+      animator?.clear()
+      executor?.shutdownNow()
     }
 
-    override fun onFileProcessed(file: ScannedFile) {
-        if (finished.get()) return
-        val count = filesCount.incrementAndGet()
-        val bytes = bytesCount.addAndGet(file.size)
-
-        if (isInteractive) {
-            animator?.update {
-                context = ScanProgressState(
-                    filesProcessed = count,
-                    bytesProcessed = bytes,
-                    startTimeNanos = startNanos,
-                    action = "Scanning & ingesting:",
-                    timeProvider = timeProvider
-                )
-            }
-        }
-    }
-
-    override fun finish() {
-        if (!finished.compareAndSet(false, true)) return
-
-        val state = currentState(action = "Scanned:")
-        val duration = (timeProvider() - startNanos).coerceAtLeast(0L).nanoseconds
-
-        if (isInteractive) {
-            animator?.clear()
-            executor?.shutdownNow()
-        }
-
-        val prefix = if (isInteractive) terminal.theme.success("✔ ") else ""
-        terminal.println(
-            "${prefix}Scanned ${state.formattedFiles} (${formatBytesShort(state.bytesProcessed)}) in ${formatDuration(duration)} (${state.formattedSpeed})"
-        )
-    }
+    val prefix = if (isInteractive) terminal.theme.success("✔ ") else ""
+    terminal.println(
+      "${prefix}Scanned ${state.formattedFiles} (${formatBytesShort(
+        state.bytesProcessed
+      )}) in ${formatDuration(duration)} (${state.formattedSpeed})"
+    )
+  }
 }
 
 /**
  * No-operation progress indicator for non-quiet mode or testing.
  */
 class NoOpScanProgressIndicator : ScanProgressIndicator {
-    override fun onFileProcessed(file: ScannedFile) = Unit
-    override fun finish() = Unit
+  override fun onFileProcessed(file: ScannedFile) = Unit
+  override fun finish() = Unit
 }

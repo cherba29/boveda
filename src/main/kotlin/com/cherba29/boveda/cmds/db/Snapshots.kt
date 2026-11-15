@@ -20,45 +20,46 @@ import org.jetbrains.exposed.v1.jdbc.Database
  * Clikt subcommand for managing database snapshots (list, delete).
  */
 class SnapshotsCommand(
-    private val serviceFactory: ((Database) -> BovedaService)? = null
+  private val serviceFactory: ((Database) -> BovedaService)? = null
 ) : CliktCommand(
-    name = "snapshots"
+  name = "snapshots"
 ) {
-    override fun help(context: Context): String =
-        "Manage database snapshots (list, delete)."
+  override fun help(context: Context): String = "Manage database snapshots (list, delete)."
 
-    val dbPath: Path? by argument(
-        name = "DATABASE",
-        help = "Path to persistent H2 database file."
-    ).path(canBeFile = true, canBeDir = false).optional()
+  val dbPath: Path? by argument(
+    name = "DATABASE",
+    help = "Path to persistent H2 database file."
+  ).path(canBeFile = true, canBeDir = false).optional()
 
-    val dbOption: Path? by option(
-        "-d", "--db",
-        help = "Path to persistent H2 database file."
-    ).path(canBeFile = true, canBeDir = false)
+  val dbOption: Path? by option(
+    "-d",
+    "--db",
+    help = "Path to persistent H2 database file."
+  ).path(canBeFile = true, canBeDir = false)
 
-    val logLevel: Level? by option(
-        "-l", "--log-level",
-        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
-    ).choice(
-        "OFF" to Level.OFF,
-        "ERROR" to Level.ERROR,
-        "WARN" to Level.WARN,
-        "WARNING" to Level.WARN,
-        "INFO" to Level.INFO,
-        "DEBUG" to Level.DEBUG,
-        "TRACE" to Level.TRACE,
-        ignoreCase = true
+  val logLevel: Level? by option(
+    "-l",
+    "--log-level",
+    help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+  ).choice(
+    "OFF" to Level.OFF,
+    "ERROR" to Level.ERROR,
+    "WARN" to Level.WARN,
+    "WARNING" to Level.WARN,
+    "INFO" to Level.INFO,
+    "DEBUG" to Level.DEBUG,
+    "TRACE" to Level.TRACE,
+    ignoreCase = true
+  )
+
+  init {
+    subcommands(
+      ListCommand(serviceFactory),
+      DeleteCommand(serviceFactory)
     )
+  }
 
-    init {
-        subcommands(
-            ListCommand(serviceFactory),
-            DeleteCommand(serviceFactory)
-        )
-    }
-
-    override fun run() {
-        logLevel?.let { LoggingConfig.setRootLevel(it) }
-    }
+  override fun run() {
+    logLevel?.let { LoggingConfig.setRootLevel(it) }
+  }
 }

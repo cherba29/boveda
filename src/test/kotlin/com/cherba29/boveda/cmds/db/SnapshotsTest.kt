@@ -11,30 +11,30 @@ import kotlin.test.assertTrue
 
 class SnapshotsTest {
 
-    @AfterTest
-    fun tearDown() {
-        LoggingConfig.setRootLevel(Level.WARN)
-    }
+  @AfterTest
+  fun tearDown() {
+    LoggingConfig.setRootLevel(Level.WARN)
+  }
 
-    @Test
-    fun `snapshots command help displays usage, options, and subcommands`() {
-        val command = SnapshotsCommand()
-        val result = command.test("--help")
+  @Test
+  fun `snapshots command help displays usage, options, and subcommands`() {
+    val command = SnapshotsCommand()
+    val result = command.test("--help")
 
-        assertEquals(0, result.statusCode)
-        assertTrue(result.output.contains("Usage: snapshots"))
-        assertTrue(result.output.contains("<database>"))
-        assertTrue(result.output.contains("--db"))
-        assertTrue(result.output.contains("--log-level"))
-        assertTrue(result.output.contains("list"))
-        assertTrue(result.output.contains("delete"))
-    }
+    assertEquals(0, result.statusCode)
+    assertTrue(result.output.contains("Usage: snapshots"))
+    assertTrue(result.output.contains("<database>"))
+    assertTrue(result.output.contains("--db"))
+    assertTrue(result.output.contains("--log-level"))
+    assertTrue(result.output.contains("list"))
+    assertTrue(result.output.contains("delete"))
+  }
 
-    @Test
-    fun `snapshots command configures log level without error`() {
-        val command = SnapshotsCommand(serviceFactory = { BovedaService(it) })
-        command.test(listOf("-l", "INFO", "list"))
+  @Test
+  fun `snapshots command configures log level without error`() {
+    val command = SnapshotsCommand(serviceFactory = { BovedaService(it) })
+    command.test(listOf("-l", "INFO", "list"))
 
-        assertEquals(Level.INFO, LoggingConfig.getRootLevel())
-    }
+    assertEquals(Level.INFO, LoggingConfig.getRootLevel())
+  }
 }

@@ -12,38 +12,38 @@ import kotlin.test.assertTrue
 
 class BovedaTest {
 
-    @AfterTest
-    fun tearDown() {
-        LoggingConfig.setRootLevel(Level.WARN)
-    }
+  @AfterTest
+  fun tearDown() {
+    LoggingConfig.setRootLevel(Level.WARN)
+  }
 
-    @Test
-    fun `boveda root command help displays usage, parameters, options, and subcommands`() {
-        val command = BovedaCommand()
-        val result = command.test("--help")
+  @Test
+  fun `boveda root command help displays usage, parameters, options, and subcommands`() {
+    val command = BovedaCommand()
+    val result = command.test("--help")
 
-        assertEquals(0, result.statusCode)
-        assertTrue(result.output.contains("Usage: boveda"))
-        assertTrue(result.output.contains("scan"))
-        assertTrue(result.output.contains("db"))
-        assertTrue(result.output.contains("--log-level"))
-    }
+    assertEquals(0, result.statusCode)
+    assertTrue(result.output.contains("Usage: boveda"))
+    assertTrue(result.output.contains("scan"))
+    assertTrue(result.output.contains("db"))
+    assertTrue(result.output.contains("--log-level"))
+  }
 
-    @Test
-    fun `boveda root command sets log level properly`() {
-        val command = BovedaCommand(serviceFactory = { BovedaService(it) })
-        val result = command.test(listOf("-l", "DEBUG", "db"))
+  @Test
+  fun `boveda root command sets log level properly`() {
+    val command = BovedaCommand(serviceFactory = { BovedaService(it) })
+    val result = command.test(listOf("-l", "DEBUG", "db"))
 
-        assertEquals(0, result.statusCode)
-        assertEquals(Level.DEBUG, LoggingConfig.getRootLevel())
-    }
+    assertEquals(0, result.statusCode)
+    assertEquals(Level.DEBUG, LoggingConfig.getRootLevel())
+  }
 
-    @Test
-    fun `boveda root command fails on invalid log level`() {
-        val command = BovedaCommand()
-        val result = command.test(listOf("--log-level", "NON_EXISTENT"))
+  @Test
+  fun `boveda root command fails on invalid log level`() {
+    val command = BovedaCommand()
+    val result = command.test(listOf("--log-level", "NON_EXISTENT"))
 
-        assertNotEquals(0, result.statusCode)
-        assertTrue(result.output.contains("invalid choice: NON_EXISTENT"))
-    }
+    assertNotEquals(0, result.statusCode)
+    assertTrue(result.output.contains("invalid choice: NON_EXISTENT"))
+  }
 }

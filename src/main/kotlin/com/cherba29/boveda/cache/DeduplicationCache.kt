@@ -12,8 +12,8 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
  * Composite key representing the unique content of a file by its byte [size] and content [hash].
  */
 data class FileContentKey(
-    val size: Long,
-    val hash: String
+  val size: Long,
+  val hash: String
 )
 
 /**
@@ -24,12 +24,12 @@ data class FileContentKey(
  * @property misses Number of cache misses.
  */
 data class CacheStatistics(
-    val size: Int,
-    val hits: Long,
-    val misses: Long
+  val size: Int,
+  val hits: Long,
+  val misses: Long
 ) {
-    val totalRequests: Long get() = hits + misses
-    val hitRatio: Double get() = if (totalRequests > 0) hits.toDouble() / totalRequests else 0.0
+  val totalRequests: Long get() = hits + misses
+  val hitRatio: Double get() = if (totalRequests > 0) hits.toDouble() / totalRequests else 0.0
 }
 
 /**
@@ -38,49 +38,49 @@ data class CacheStatistics(
  */
 interface DeduplicationCache {
 
-    /**
-     * Retrieves the cached [EntityID] for the given [size] and [hash], or null if absent.
-     * Records a cache hit or miss in cache statistics.
-     */
-    fun get(size: Long, hash: String): EntityID<Int>?
+  /**
+   * Retrieves the cached [EntityID] for the given [size] and [hash], or null if absent.
+   * Records a cache hit or miss in cache statistics.
+   */
+  fun get(size: Long, hash: String): EntityID<Int>?
 
-    /**
-     * Internal lookup checking if [size] and [hash] is cached without altering hit/miss metrics.
-     */
-    fun peek(size: Long, hash: String): EntityID<Int>?
+  /**
+   * Internal lookup checking if [size] and [hash] is cached without altering hit/miss metrics.
+   */
+  fun peek(size: Long, hash: String): EntityID<Int>?
 
-    /**
-     * Associates the given [size] and [hash] with [id] in the cache.
-     */
-    fun put(size: Long, hash: String, id: EntityID<Int>)
+  /**
+   * Associates the given [size] and [hash] with [id] in the cache.
+   */
+  fun put(size: Long, hash: String, id: EntityID<Int>)
 
-    /**
-     * Checks if the cache contains an entry for [size] and [hash].
-     */
-    fun contains(size: Long, hash: String): Boolean
+  /**
+   * Checks if the cache contains an entry for [size] and [hash].
+   */
+  fun contains(size: Long, hash: String): Boolean
 
-    /**
-     * Pre-warms the cache by loading all existing records from [RepoFiles] into memory.
-     *
-     * @param database The [Database] connection to query.
-     * @return The number of records loaded into the cache.
-     */
-    fun warmUp(database: Database): Int
+  /**
+   * Pre-warms the cache by loading all existing records from [RepoFiles] into memory.
+   *
+   * @param database The [Database] connection to query.
+   * @return The number of records loaded into the cache.
+   */
+  fun warmUp(database: Database): Int
 
-    /**
-     * Returns the total number of entries currently held in the cache.
-     */
-    fun size(): Int
+  /**
+   * Returns the total number of entries currently held in the cache.
+   */
+  fun size(): Int
 
-    /**
-     * Clears all cached entries and resets statistics.
-     */
-    fun clear()
+  /**
+   * Clears all cached entries and resets statistics.
+   */
+  fun clear()
 
-    /**
-     * Returns a snapshot of current cache statistics.
-     */
-    fun getStatistics(): CacheStatistics
+  /**
+   * Returns a snapshot of current cache statistics.
+   */
+  fun getStatistics(): CacheStatistics
 }
 
 /**
@@ -89,56 +89,56 @@ interface DeduplicationCache {
  * @param initialCapacity Initial capacity for the underlying map.
  */
 class InMemoryDeduplicationCache(
-    initialCapacity: Int = 256
+  initialCapacity: Int = 256
 ) : DeduplicationCache {
 
-    private val map = ConcurrentHashMap<FileContentKey, EntityID<Int>>(initialCapacity)
-    private val hits = AtomicLong(0)
-    private val misses = AtomicLong(0)
+  private val map = ConcurrentHashMap<FileContentKey, EntityID<Int>>(initialCapacity)
+  private val hits = AtomicLong(0)
+  private val misses = AtomicLong(0)
 
-    override fun get(size: Long, hash: String): EntityID<Int>? {
-        val key = FileContentKey(size, hash)
-        val result = map[key]
-        if (result != null) {
-            hits.incrementAndGet()
-        } else {
-            misses.incrementAndGet()
-        }
-        return result
+  override fun get(size: Long, hash: String): EntityID<Int>? {
+    val key = FileContentKey(size, hash)
+    val result = map[key]
+    if (result != null) {
+      hits.incrementAndGet()
+    } else {
+      misses.incrementAndGet()
     }
+    return result
+  }
 
-    override fun peek(size: Long, hash: String): EntityID<Int>? {
-        return map[FileContentKey(size, hash)]
+  override fun peek(size: Long, hash: String): EntityID<Int>? {
+    return map[FileContentKey(size, hash)]
+  }
+
+  override fun put(size: Long, hash: String, id: EntityID<Int>) {
+    map[FileContentKey(size, hash)] = id
+  }
+
+  override fun contains(size: Long, hash: String): Boolean {
+    return map.containsKey(FileContentKey(size, hash))
+  }
+
+  override fun warmUp(database: Database): Int = transaction(database) {
+    var count = 0
+    RepoFiles.selectAll().forEach { row ->
+      put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
+      count++
     }
+    count
+  }
 
-    override fun put(size: Long, hash: String, id: EntityID<Int>) {
-        map[FileContentKey(size, hash)] = id
-    }
+  override fun size(): Int = map.size
 
-    override fun contains(size: Long, hash: String): Boolean {
-        return map.containsKey(FileContentKey(size, hash))
-    }
+  override fun clear() {
+    map.clear()
+    hits.set(0)
+    misses.set(0)
+  }
 
-    override fun warmUp(database: Database): Int = transaction(database) {
-        var count = 0
-        RepoFiles.selectAll().forEach { row ->
-            put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
-            count++
-        }
-        count
-    }
-
-    override fun size(): Int = map.size
-
-    override fun clear() {
-        map.clear()
-        hits.set(0)
-        misses.set(0)
-    }
-
-    override fun getStatistics(): CacheStatistics = CacheStatistics(
-        size = map.size,
-        hits = hits.get(),
-        misses = misses.get()
-    )
+  override fun getStatistics(): CacheStatistics = CacheStatistics(
+    size = map.size,
+    hits = hits.get(),
+    misses = misses.get()
+  )
 }

@@ -20,36 +20,37 @@ import org.jetbrains.exposed.v1.jdbc.Database
  * @param progressIndicatorFactory Optional factory to supply custom [ScanProgressIndicator] (useful for testing).
  */
 class BovedaCommand(
-    private val serviceFactory: ((Database) -> BovedaService)? = null,
-    private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
+  private val serviceFactory: ((Database) -> BovedaService)? = null,
+  private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
 ) : CliktCommand(
-    name = "boveda"
+  name = "boveda"
 ) {
-    override fun help(context: Context): String =
-        "Boveda: File vault fingerprinting, deduplication scanner, and analytical database querying."
+  override fun help(context: Context): String =
+    "Boveda: File vault fingerprinting, deduplication scanner, and analytical database querying."
 
-    val logLevel: Level by option(
-        "-l", "--log-level",
-        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE). Default is WARN."
-    ).choice(
-        "OFF" to Level.OFF,
-        "ERROR" to Level.ERROR,
-        "WARN" to Level.WARN,
-        "WARNING" to Level.WARN,
-        "INFO" to Level.INFO,
-        "DEBUG" to Level.DEBUG,
-        "TRACE" to Level.TRACE,
-        ignoreCase = true
-    ).default(Level.WARN)
+  val logLevel: Level by option(
+    "-l",
+    "--log-level",
+    help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE). Default is WARN."
+  ).choice(
+    "OFF" to Level.OFF,
+    "ERROR" to Level.ERROR,
+    "WARN" to Level.WARN,
+    "WARNING" to Level.WARN,
+    "INFO" to Level.INFO,
+    "DEBUG" to Level.DEBUG,
+    "TRACE" to Level.TRACE,
+    ignoreCase = true
+  ).default(Level.WARN)
 
-    init {
-        subcommands(
-            ScanCommand(serviceFactory, progressIndicatorFactory),
-            DbCommand(serviceFactory)
-        )
-    }
+  init {
+    subcommands(
+      ScanCommand(serviceFactory, progressIndicatorFactory),
+      DbCommand(serviceFactory)
+    )
+  }
 
-    override fun run() {
-        LoggingConfig.setRootLevel(logLevel)
-    }
+  override fun run() {
+    LoggingConfig.setRootLevel(logLevel)
+  }
 }

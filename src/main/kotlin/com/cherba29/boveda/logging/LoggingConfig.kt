@@ -10,22 +10,22 @@ import org.slf4j.LoggerFactory
  */
 object LoggingConfig {
 
-    /**
-     * Sets the root logger level in Logback.
-     *
-     * @param level The target [Level] to set (e.g. [Level.WARN], [Level.DEBUG]).
-     */
-    fun setRootLevel(level: Level) {
-        val loggerContext = LoggerFactory.getILoggerFactory() as? LoggerContext ?: return
-        val rootLogger = loggerContext.getLogger(Logger.ROOT_LOGGER_NAME)
-        rootLogger.level = level
-    }
+  /**
+   * Sets the root logger level in Logback.
+   *
+   * @param level The target [Level] to set (e.g. [Level.WARN], [Level.DEBUG]).
+   */
+  fun setRootLevel(level: Level) {
+    val loggerContext = LoggerFactory.getILoggerFactory() as? LoggerContext ?: return
+    val rootLogger = loggerContext.getLogger(Logger.ROOT_LOGGER_NAME)
+    rootLogger.level = level
+  }
 
-    /**
-     * Returns the current root logger level from Logback.
-     */
-    fun getRootLevel(): Level? {
-        val loggerContext = LoggerFactory.getILoggerFactory() as? LoggerContext ?: return null
-        return loggerContext.getLogger(Logger.ROOT_LOGGER_NAME).level
-    }
+  /**
+   * Returns the current root logger level from Logback.
+   */
+  fun getRootLevel(): Level? {
+    val loggerContext = LoggerFactory.getILoggerFactory() as? LoggerContext ?: return null
+    return loggerContext.getLogger(Logger.ROOT_LOGGER_NAME).level
+  }
 }

@@ -7,6 +7,7 @@ plugins {
   id("org.jetbrains.kotlinx.kover") version "0.7.0"
   id("io.kotest") version "6.0.7"
   alias(libs.plugins.graalvm.native)
+  alias(libs.plugins.ktlint)
   application
 }
 
@@ -77,6 +78,11 @@ tasks.test {
     // Optional: prints System.out/System.err
     // showStandardStreams = true
   }
+}
+
+ktlint {
+  android.set(true)
+  outputToConsole.set(true)
 }
 
 koverReport {
