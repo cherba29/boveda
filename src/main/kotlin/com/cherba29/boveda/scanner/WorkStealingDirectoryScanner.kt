@@ -1,0 +1,240 @@
+package com.cherba29.boveda.scanner
+
+import com.cherba29.boveda.hash.FileHasher
+import com.cherba29.boveda.hash.MessageDigestFileHasher
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.ForkJoinPool
+import java.util.concurrent.ForkJoinWorkerThread
+import java.util.concurrent.RecursiveAction
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.io.path.fileSize
+import kotlin.io.path.getLastModifiedTime
+import kotlin.io.path.invariantSeparatorsPathString
+
+/**
+ * Work-stealing parallel directory scanner that concurrentizes directory tree traversal
+ * across a [ForkJoinPool].
+ *
+ * Subdirectory tasks and file hashing tasks are pushed to thread-local deques and stolen
+ * by idle worker threads, ensuring optimal load balancing across deep and wide hierarchies.
+ *
+ * @property parallelism Level of parallelism (number of worker threads in the [ForkJoinPool]).
+ * @property hasher The [FileHasher] implementation used to compute cryptographic hashes.
+ * @property queueCapacity Bounded capacity for the output queue, preventing unbounded memory consumption.
+ * @property fileChunkSize Maximum number of files processed per [HashFilesTask] for balanced work-stealing granularity.
+ */
+class WorkStealingDirectoryScanner(
+    val parallelism: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1),
+    private val hasher: FileHasher = MessageDigestFileHasher(),
+    private val queueCapacity: Int = DEFAULT_QUEUE_CAPACITY,
+    private val fileChunkSize: Int = DEFAULT_FILE_CHUNK_SIZE
+) : DirectoryScanner {
+
+    companion object {
+        const val DEFAULT_QUEUE_CAPACITY = 2048
+        const val DEFAULT_FILE_CHUNK_SIZE = 16
+    }
+
+    init {
+        require(parallelism >= 1) { "parallelism must be at least 1, but was $parallelism" }
+        require(queueCapacity >= 1) { "queueCapacity must be at least 1, but was $queueCapacity" }
+        require(fileChunkSize >= 1) { "fileChunkSize must be at least 1, but was $fileChunkSize" }
+    }
+
+    private sealed interface ResultItem {
+        data class Success(val file: ScannedFile) : ResultItem
+        data class Failure(val error: Throwable) : ResultItem
+        data object Done : ResultItem
+    }
+
+    private class NamedForkJoinWorkerThreadFactory(
+        private val prefix: String
+    ) : ForkJoinPool.ForkJoinWorkerThreadFactory {
+        private val counter = AtomicInteger(1)
+        override fun newThread(pool: ForkJoinPool): ForkJoinWorkerThread {
+            val thread = ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool)
+            thread.name = "$prefix-${counter.getAndIncrement()}"
+            return thread
+        }
+    }
+
+    private class HashFilesTask(
+        private val files: List<DiscoveredFile>,
+        private val algorithm: String,
+        private val hasher: FileHasher,
+        private val resultQueue: BlockingQueue<ResultItem>
+    ) : RecursiveAction() {
+
+        override fun compute() {
+            for (file in files) {
+                if (Thread.currentThread().isInterrupted) return
+                try {
+                    val hash = hasher.computeHash(file.path.toFile(), algorithm)
+                    val scanned = ScannedFile(
+                        path = file.path,
+                        relativePath = file.relativePath,
+                        size = file.size,
+                        hash = hash,
+                        lastModifiedTime = file.lastModifiedTime
+                    )
+                    resultQueue.put(ResultItem.Success(scanned))
+                } catch (e: Throwable) {
+                    if (e !is InterruptedException) {
+                        resultQueue.put(ResultItem.Failure(e))
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private class ScanDirectoryTask(
+        private val dir: Path,
+        private val normalizedRoot: Path,
+        private val algorithm: String,
+        private val hasher: FileHasher,
+        private val resultQueue: BlockingQueue<ResultItem>,
+        private val fileChunkSize: Int
+    ) : RecursiveAction() {
+
+        override fun compute() {
+            if (Thread.currentThread().isInterrupted) return
+
+            val subDirTasks = mutableListOf<ScanDirectoryTask>()
+            val discoveredFiles = mutableListOf<DiscoveredFile>()
+
+            try {
+                Files.newDirectoryStream(dir).use { stream ->
+                    for (entry in stream) {
+                        if (Thread.currentThread().isInterrupted) return
+                        val normalizedEntry = entry.normalize()
+
+                        if (Files.isDirectory(normalizedEntry) && !Files.isSymbolicLink(normalizedEntry)) {
+                            subDirTasks.add(
+                                ScanDirectoryTask(
+                                    dir = normalizedEntry,
+                                    normalizedRoot = normalizedRoot,
+                                    algorithm = algorithm,
+                                    hasher = hasher,
+                                    resultQueue = resultQueue,
+                                    fileChunkSize = fileChunkSize
+                                )
+                            )
+                        } else if (Files.isRegularFile(normalizedEntry)) {
+                            val relative = normalizedRoot.relativize(normalizedEntry).invariantSeparatorsPathString
+                            val relativePath = if (relative.isNotEmpty()) relative else normalizedEntry.invariantSeparatorsPathString
+                            val size = try {
+                                normalizedEntry.fileSize()
+                            } catch (_: Exception) {
+                                0L
+                            }
+                            val lastModified = try {
+                                normalizedEntry.getLastModifiedTime()
+                            } catch (_: Exception) {
+                                null
+                            }
+                            discoveredFiles.add(
+                                DiscoveredFile(
+                                    path = normalizedEntry,
+                                    relativePath = relativePath,
+                                    size = size,
+                                    lastModifiedTime = lastModified
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                if (e !is InterruptedException) {
+                    resultQueue.put(ResultItem.Failure(e))
+                }
+                return
+            }
+
+            // Chunk discovered files into hash tasks
+            val hashTasks = mutableListOf<RecursiveAction>()
+            if (discoveredFiles.isNotEmpty()) {
+                for (chunk in discoveredFiles.chunked(fileChunkSize)) {
+                    hashTasks.add(
+                        HashFilesTask(
+                            files = chunk,
+                            algorithm = algorithm,
+                            hasher = hasher,
+                            resultQueue = resultQueue
+                        )
+                    )
+                }
+            }
+
+            // Fork all directory exploration and file hashing tasks into the work-stealing pool
+            val allTasks = ArrayList<RecursiveAction>(subDirTasks.size + hashTasks.size)
+            allTasks.addAll(subDirTasks)
+            allTasks.addAll(hashTasks)
+
+            if (allTasks.isNotEmpty()) {
+                invokeAll(allTasks)
+            }
+        }
+    }
+
+    override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> {
+        require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
+        require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
+
+        val normalizedRoot = rootPath.normalize()
+
+        return sequence {
+            val resultQueue = ArrayBlockingQueue<ResultItem>(queueCapacity)
+            val pool = ForkJoinPool(
+                parallelism,
+                NamedForkJoinWorkerThreadFactory("boveda-work-stealing"),
+                null,
+                false // LIFO depth-first traversal with FIFO work-stealing from top of deque
+            )
+
+            val rootTask = ScanDirectoryTask(
+                dir = normalizedRoot,
+                normalizedRoot = normalizedRoot,
+                algorithm = algorithm,
+                hasher = hasher,
+                resultQueue = resultQueue,
+                fileChunkSize = fileChunkSize
+            )
+
+            val rootFuture = pool.submit(rootTask)
+
+            val monitorThread = Thread({
+                try {
+                    rootFuture.join()
+                    resultQueue.put(ResultItem.Done)
+                } catch (t: Throwable) {
+                    val cause = t.cause ?: t
+                    if (cause !is InterruptedException) {
+                        resultQueue.offer(ResultItem.Failure(cause))
+                    }
+                    resultQueue.offer(ResultItem.Done)
+                }
+            }, "boveda-work-stealing-monitor").apply {
+                isDaemon = true
+                start()
+            }
+
+            try {
+                while (true) {
+                    val item = resultQueue.take()
+                    when (item) {
+                        is ResultItem.Success -> yield(item.file)
+                        is ResultItem.Failure -> throw item.error
+                        is ResultItem.Done -> break
+                    }
+                }
+            } finally {
+                pool.shutdownNow()
+                monitorThread.interrupt()
+            }
+        }
+    }
+}

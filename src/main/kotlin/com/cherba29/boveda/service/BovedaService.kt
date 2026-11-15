@@ -21,6 +21,7 @@ import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
+import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 import java.nio.file.Path
 import java.util.Locale
 import kotlin.io.path.invariantSeparatorsPathString
@@ -48,7 +49,7 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
  */
 class BovedaService(
     private val database: Database,
-    val scanner: DirectoryScanner = ParallelDirectoryScanner(),
+    val scanner: DirectoryScanner = WorkStealingDirectoryScanner(),
     private val deduplicateFiles: Boolean = true,
     val batchSize: Int = DEFAULT_BATCH_SIZE,
     val cache: DeduplicationCache = InMemoryDeduplicationCache(),

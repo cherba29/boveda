@@ -6,8 +6,9 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 
 ## Features
 
-- **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
+- **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs.
 - **Multi-Threaded Producer-Consumer Pipeline**: Decouples directory walking (Stage 1), cryptographic hashing across worker thread pools (Stage 2), and database persistence (Stage 3) via bounded queues for maximum multi-core CPU utilization.
+- **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
 - **Streaming Cryptographic Hashing**: Chunk-based hashing (MD5, SHA-256, SHA-512, etc.) that handles large files efficiently without loading them entirely into memory.
 - **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
@@ -78,6 +79,11 @@ Options:
                           during scanning. Default is 1000.
   -t, --threads=<int>     Number of worker threads for parallel file hashing
                           (defaults to available CPU cores).
+  -s, --scanner=(work-stealing|parallel|sequential)
+                          Directory scanner strategy: 'work-stealing' (default,
+                          multi-threaded tree exploration), 'parallel'
+                          (producer-consumer pipeline), or 'sequential'.
+  --work-stealing         Enable work-stealing parallel directory traversal.
   --no-cache-warmup       Disable pre-warming the in-memory deduplication cache
                           from the database on startup.
   -h, --help              Show this message and exit
@@ -204,35 +210,56 @@ Accelerate scanning across multi-core CPUs by allocating a dedicated worker thre
 ./gradlew run --args="--threads 8 /path/to/my/documents"
 ```
 
-### 11. Combined Options
-Scan quietly using SHA-256 with 8 worker threads, debug logging to stderr, custom batch size of 2,000, only showing duplicates:
+### 11. Work-Stealing Directory Traversal
+Select the directory scanner strategy (`work-stealing` [default], `parallel`, or `sequential`):
 ```bash
-./gradlew run --args="-q -a SHA-256 -t 8 -b 2000 -l DEBUG --duplicates-only /path/to/my/photos"
+# Explicit work-stealing ForkJoinPool scanner
+./gradlew run --args="--scanner work-stealing --threads 8 /path/to/my/documents"
+
+# Or use the shortcut flag
+./gradlew run --args="--work-stealing /path/to/my/documents"
+
+# Sequential scanner for rotational hard disks
+./gradlew run --args="--scanner sequential /path/to/my/documents"
+```
+
+### 12. Combined Options
+Scan quietly using SHA-256 with work-stealing traversal across 8 threads, debug logging to stderr, custom batch size of 2,000, only showing duplicates:
+```bash
+./gradlew run --args="-q -a SHA-256 --work-stealing -t 8 -b 2000 -l DEBUG --duplicates-only /path/to/my/photos"
 ```
 
 ---
 
 ## Architecture Pipeline
 
-Boveda employs a 3-stage asynchronous producer-consumer pipeline:
+Boveda supports both work-stealing tree traversal and producer-consumer pipelining:
 
 ```mermaid
 flowchart TD
-    Scanner["Stage 1: Directory Walker\n(Fast filesystem discovery)"]
-    Queue1["Bounded Work Queue\n(Discovered file paths)"]
-    Pool["Stage 2: Parallel Hash Worker Pool\n(N Threads = CPU cores)"]
-    Queue2["Bounded Ingestion Queue\n(ScannedFile records)"]
-    Consumer["Stage 3: Batch DB Inserter\n(In-Memory CAS Cache + batchInsert)"]
+    subgraph WorkStealing["Work-Stealing Directory Scanner (Option 4)"]
+        WS_Pool["ForkJoinPool\n(Work-Stealing Worker Deques)"]
+        DirTask["ScanDirectoryTask\n(Forks Subdirectory Tasks)"]
+        HashTask["HashFilesTask\n(Forks File Hash Tasks)"]
+        WS_Pool --- DirTask
+        WS_Pool --- HashTask
+    end
 
-    Scanner --> Queue1
-    Queue1 --> Pool
-    Pool --> Queue2
-    Queue2 --> Consumer
+    subgraph Pipeline["Producer-Consumer Pipeline (Option 1)"]
+        Walker["Producer Thread\n(Path.walk)"]
+        WorkQ["Bounded Work Queue"]
+        WorkerPool["Hash Worker Pool\n(N Threads)"]
+        Walker --> WorkQ --> WorkerPool
+    end
+
+    WorkStealing --> ResultQ["Bounded Result Queue\n(ScannedFile records)"]
+    Pipeline --> ResultQ
+    ResultQ --> Consumer["Batch DB Inserter\n(In-Memory CAS Cache + batchInsert)"]
 ```
 
-1. **Stage 1 (Discovery)**: The producer walks the directory tree rapidly without hashing, placing file metadata into a bounded work queue.
-2. **Stage 2 (Parallel Hashing)**: A configurable pool of worker threads concurrently hashes file streams using chunked memory-efficient buffers.
-3. **Stage 3 (Batch Persistence)**: The database consumer drains batches of file records, resolves duplicate content fingerprints via the in-memory cache, and batch inserts records in single transactions.
+1. **Work-Stealing Scanner ([WorkStealingDirectoryScanner](file:///home/arti/github/cherba29/boveda/src/main/kotlin/com/cherba29/boveda/scanner/WorkStealingDirectoryScanner.kt))**: Recursively splits directory exploration and file hashing into fine-grained tasks in a `ForkJoinPool`. Idle threads steal directory branches or file chunks, maximizing throughput on deep hierarchies and fast NVMe storage.
+2. **Producer-Consumer Pipeline ([ParallelDirectoryScanner](file:///home/arti/github/cherba29/boveda/src/main/kotlin/com/cherba29/boveda/scanner/ParallelDirectoryScanner.kt))**: Emits files from a single discovery thread into a bounded queue drained by a dedicated worker pool.
+3. **Batch Persistence ([BovedaService](file:///home/arti/github/cherba29/boveda/src/main/kotlin/com/cherba29/boveda/service/BovedaService.kt))**: Drains records, resolves duplicates against the in-memory cache, and batch inserts records in single transactions.
 
 ---
 
@@ -286,9 +313,11 @@ src/main/
     ├── logging/
     │   └── LoggingConfig.kt    # Logback runtime level configuration
     ├── scanner/
-    │   ├── ScannedFile.kt              # Discovered file metadata model
-    │   ├── DirectoryScanner.kt         # Scanner interface & FileTreeDirectoryScanner
-    │   └── ParallelDirectoryScanner.kt # Multi-threaded producer-consumer scanner
+    │   ├── DiscoveredFile.kt               # Intermediate discovered file metadata
+    │   ├── ScannedFile.kt                  # Discovered file metadata model
+    │   ├── DirectoryScanner.kt             # Scanner interface & FileTreeDirectoryScanner
+    │   ├── ParallelDirectoryScanner.kt     # Multi-threaded producer-consumer scanner
+    │   └── WorkStealingDirectoryScanner.kt # Work-stealing ForkJoinPool scanner
     ├── progress/
     │   └── ScanProgressIndicator.kt    # Mordant progress indicator & ingestion speed metrics
     ├── model/

@@ -17,9 +17,11 @@ import com.cherba29.boveda.progress.MordantScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressState
 import com.cherba29.boveda.scanner.DirectoryScanner
+import com.cherba29.boveda.scanner.DiscoveredFile
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
+import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -57,7 +59,9 @@ typealias ScanProgressIndicator = com.cherba29.boveda.progress.ScanProgressIndic
 typealias MordantScanProgressIndicator = com.cherba29.boveda.progress.MordantScanProgressIndicator
 typealias ScanProgressState = com.cherba29.boveda.progress.ScanProgressState
 typealias ParallelDirectoryScanner = com.cherba29.boveda.scanner.ParallelDirectoryScanner
+typealias WorkStealingDirectoryScanner = com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 typealias FileTreeDirectoryScanner = com.cherba29.boveda.scanner.FileTreeDirectoryScanner
+typealias DiscoveredFile = com.cherba29.boveda.scanner.DiscoveredFile
 
 /**
  * Clikt command line interface for Boveda vault operations.
@@ -128,6 +132,21 @@ class BovedaCommand(
         help = "Number of worker threads for parallel file hashing (defaults to available CPU cores)."
     ).int().default(Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
 
+    val scannerType: String by option(
+        "-s", "--scanner",
+        help = "Directory scanner strategy: 'work-stealing' (default, multi-threaded tree exploration), 'parallel' (producer-consumer pipeline), or 'sequential' (single-threaded)."
+    ).choice(
+        "work-stealing" to "work-stealing",
+        "parallel" to "parallel",
+        "sequential" to "sequential",
+        ignoreCase = true
+    ).default("work-stealing")
+
+    val workStealing: Boolean by option(
+        "--work-stealing",
+        help = "Enable work-stealing parallel directory traversal using ForkJoinPool."
+    ).flag(default = false)
+
     val noCacheWarmup: Boolean by option(
         "--no-cache-warmup",
         help = "Disable pre-warming the in-memory deduplication cache from the database on startup."
@@ -145,10 +164,18 @@ class BovedaCommand(
             DatabaseFactory.connectInMemory("test")
         }
 
-        val scanner: DirectoryScanner = if (threads == 1) {
-            FileTreeDirectoryScanner()
-        } else {
-            ParallelDirectoryScanner(threadCount = threads)
+        val effectiveScannerType = if (workStealing) "work-stealing" else scannerType
+
+        val scanner: DirectoryScanner = when {
+            threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true) -> {
+                FileTreeDirectoryScanner()
+            }
+            effectiveScannerType.equals("parallel", ignoreCase = true) -> {
+                ParallelDirectoryScanner(threadCount = threads)
+            }
+            else -> {
+                WorkStealingDirectoryScanner(parallelism = threads)
+            }
         }
 
         val service = serviceFactory?.invoke(repoDb) ?: BovedaService(

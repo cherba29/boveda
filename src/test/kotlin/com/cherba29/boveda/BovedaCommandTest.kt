@@ -37,6 +37,8 @@ class BovedaCommandTest {
         assertTrue(result.output.contains("--duplicates-only"))
         assertTrue(result.output.contains("--batch-size"))
         assertTrue(result.output.contains("--threads"))
+        assertTrue(result.output.contains("--scanner"))
+        assertTrue(result.output.contains("--work-stealing"))
         assertTrue(result.output.contains("--no-cache-warmup"))
     }
 
@@ -322,6 +324,36 @@ class BovedaCommandTest {
             assertTrue(result.output.contains("t1.txt"))
             assertTrue(result.output.contains("t2.txt"))
             assertTrue(result.output.contains("### ==== Selecting from DB ==== ###"))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `scanner options configure work-stealing, parallel, and sequential strategies`() {
+        val tempDir = Files.createTempDirectory("clikt-scanner-test")
+        try {
+            tempDir.resolve("test.txt").writeText("scanner strategy content")
+
+            val command1 = BovedaCommand()
+            val resultWs = command1.test(listOf("--scanner", "work-stealing", tempDir.toString()))
+            assertEquals(0, resultWs.statusCode)
+            assertTrue(resultWs.output.contains("test.txt"))
+
+            val command2 = BovedaCommand()
+            val resultFlag = command2.test(listOf("--work-stealing", tempDir.toString()))
+            assertEquals(0, resultFlag.statusCode)
+            assertTrue(resultFlag.output.contains("test.txt"))
+
+            val command3 = BovedaCommand()
+            val resultParallel = command3.test(listOf("--scanner", "parallel", tempDir.toString()))
+            assertEquals(0, resultParallel.statusCode)
+            assertTrue(resultParallel.output.contains("test.txt"))
+
+            val command4 = BovedaCommand()
+            val resultSeq = command4.test(listOf("--scanner", "sequential", tempDir.toString()))
+            assertEquals(0, resultSeq.statusCode)
+            assertTrue(resultSeq.output.contains("test.txt"))
         } finally {
             tempDir.toFile().deleteRecursively()
         }
