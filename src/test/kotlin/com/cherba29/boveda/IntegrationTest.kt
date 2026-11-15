@@ -59,16 +59,19 @@ class IntegrationTest {
     }
 
     @Test
-    fun `main function runs successfully with directory argument`() {
+    fun `main function runs successfully with scan and db subcommands`() {
         val tempDir = Files.createTempDirectory("boveda-main-e2e")
         try {
             tempDir.resolve("sample.txt").writeText("sample file for main")
+            val dbFile = tempDir.resolve("main_test_db")
 
             val originalOut = System.out
             val outputStream = ByteArrayOutputStream()
             try {
                 System.setOut(PrintStream(outputStream))
-                main(arrayOf(tempDir.toString()))
+                main(arrayOf("scan", tempDir.toString(), dbFile.toString()))
+                main(arrayOf("db", dbFile.toString()))
+                main(arrayOf("db", "print-duplicates", dbFile.toString()))
             } finally {
                 System.setOut(originalOut)
             }
@@ -77,6 +80,7 @@ class IntegrationTest {
             assertTrue(output.contains("Scanning directory: $tempDir"))
             assertTrue(output.contains("sample.txt"))
             assertTrue(output.contains("### ==== Selecting from DB ==== ###"))
+            assertTrue(output.contains("### ==== Duplicate Files in DB ==== ###"))
         } finally {
             tempDir.toFile().deleteRecursively()
         }

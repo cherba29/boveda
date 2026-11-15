@@ -25,8 +25,9 @@ object DatabaseFactory {
      * Connects to a persistent file-based H2 database at [path] and initializes tables.
      */
     fun connectFile(path: String): Database {
+        val normalizedPath = if (path.endsWith(".mv.db")) path.removeSuffix(".mv.db") else path
         val database = Database.connect(
-            url = "jdbc:h2:file:$path;DB_CLOSE_DELAY=-1",
+            url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1",
             driver = "org.h2.Driver"
         )
         initSchema(database)

@@ -25,19 +25,21 @@ import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
+import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.core.main
+import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.core.terminal
 import com.github.ajalt.clikt.parameters.arguments.argument
-import com.github.ajalt.clikt.parameters.arguments.default
+import com.github.ajalt.clikt.parameters.arguments.optional
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
-import java.io.File
+import com.github.ajalt.mordant.terminal.Terminal
+import java.nio.file.Files
 import java.nio.file.Path
-import kotlin.io.path.Path
 import kotlin.time.Duration.Companion.nanoseconds
 import org.jetbrains.exposed.v1.jdbc.Database
 
@@ -63,40 +65,37 @@ typealias WorkStealingDirectoryScanner = com.cherba29.boveda.scanner.WorkStealin
 typealias FileTreeDirectoryScanner = com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 typealias DiscoveredFile = com.cherba29.boveda.scanner.DiscoveredFile
 
+internal fun validateDatabaseFileExists(path: Path) {
+    val pathStr = path.toString()
+    val base = if (pathStr.endsWith(".mv.db")) pathStr.removeSuffix(".mv.db") else pathStr
+    val fileExists = Files.exists(Path.of(base)) || Files.exists(Path.of("$base.mv.db"))
+    if (!fileExists) {
+        throw UsageError("Database file does not exist: $path")
+    }
+}
+
+internal fun resolveSnapshot(service: BovedaService, snapshotId: Int?): RepoSnapshot? {
+    return if (snapshotId != null) {
+        service.findSnapshot(snapshotId)
+    } else {
+        service.getLatestSnapshot()
+    }
+}
+
 /**
- * Clikt command line interface for Boveda vault operations.
+ * Root Clikt command for Boveda operations, providing 'scan' and 'db' subcommands.
  *
  * @param serviceFactory Optional factory to supply custom [BovedaService] (useful for testing or custom configuration).
  * @param progressIndicatorFactory Optional factory to supply custom [ScanProgressIndicator] (useful for testing).
  */
 class BovedaCommand(
     private val serviceFactory: ((Database) -> BovedaService)? = null,
-    private val progressIndicatorFactory: ((com.github.ajalt.mordant.terminal.Terminal) -> ScanProgressIndicator)? = null
+    private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
 ) : CliktCommand(
     name = "boveda"
 ) {
     override fun help(context: Context): String =
-        "Scan directories, record file fingerprints in database, and query results."
-
-    val directory: Path by argument(
-        name = "DIRECTORY",
-        help = "Directory path to scan (defaults to current directory '.')"
-    ).path(
-        mustExist = true,
-        canBeFile = false,
-        canBeDir = true,
-        mustBeReadable = true
-    ).default(Path("."))
-
-    val algorithm: String by option(
-        "-a", "--algorithm",
-        help = "Cryptographic hashing algorithm (e.g. MD5, SHA-256, SHA-512). Default is MD5."
-    ).default("MD5")
-
-    val dbPath: Path? by option(
-        "-d", "--db",
-        help = "Optional file path for persistent H2 database. Defaults to an in-memory database."
-    ).path(canBeFile = true, canBeDir = false)
+        "Boveda: File vault fingerprinting, deduplication scanner, and analytical database querying."
 
     val logLevel: Level by option(
         "-l", "--log-level",
@@ -112,14 +111,60 @@ class BovedaCommand(
         ignoreCase = true
     ).default(Level.WARN)
 
+    init {
+        val dbCommand = DbCommand(serviceFactory)
+        dbCommand.subcommands(PrintDuplicatesCommand(serviceFactory))
+        subcommands(
+            ScanCommand(serviceFactory, progressIndicatorFactory),
+            dbCommand
+        )
+    }
+
+    override fun run() {
+        LoggingConfig.setRootLevel(logLevel)
+    }
+}
+
+/**
+ * Clikt subcommand for scanning a directory and populating the target database.
+ */
+class ScanCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null,
+    private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
+) : CliktCommand(
+    name = "scan"
+) {
+    override fun help(context: Context): String =
+        "Scan directory and populate the target database with file fingerprints."
+
+    val directory: Path by argument(
+        name = "DIRECTORY",
+        help = "Directory path to scan."
+    ).path(
+        mustExist = true,
+        canBeFile = false,
+        canBeDir = true,
+        mustBeReadable = true
+    )
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Target database file path."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Target database file path."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val algorithm: String by option(
+        "-a", "--algorithm",
+        help = "Cryptographic hashing algorithm (e.g. MD5, SHA-256, SHA-512). Default is MD5."
+    ).default("MD5")
+
     val quiet: Boolean by option(
         "-q", "--quiet",
         help = "Suppress per-file progress output during directory scan."
-    ).flag(default = false)
-
-    val duplicatesOnly: Boolean by option(
-        "--duplicates-only",
-        help = "Only query and print files that have duplicate contents."
     ).flag(default = false)
 
     val batchSize: Int by option(
@@ -152,16 +197,28 @@ class BovedaCommand(
         help = "Disable pre-warming the in-memory deduplication cache from the database on startup."
     ).flag(default = false)
 
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
     override fun run() {
-        val startTime = System.nanoTime()
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
 
-        // Configure logging level from command-line argument
-        LoggingConfig.setRootLevel(logLevel)
-
-        val repoDb = if (dbPath != null) {
-            DatabaseFactory.connectFile(dbPath.toString())
-        } else {
-            DatabaseFactory.connectInMemory("test")
+        val resolvedDbPath = dbPath ?: dbOption
+        val repoDb = when {
+            resolvedDbPath != null -> DatabaseFactory.connectFile(resolvedDbPath.toString())
+            serviceFactory != null -> DatabaseFactory.connectInMemory("test")
+            else -> throw UsageError("Target database must be specified as an argument or via --db")
         }
 
         val effectiveScannerType = if (workStealing) "work-stealing" else scannerType
@@ -192,7 +249,7 @@ class BovedaCommand(
         }
 
         echo("Scanning directory: $directory")
-        val snapshot = try {
+        try {
             service.scanAndRecord(directory, algorithm = algorithm) { file ->
                 if (!quiet) {
                     echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
@@ -203,25 +260,154 @@ class BovedaCommand(
         } finally {
             progressIndicator?.finish()
         }
+    }
+}
 
-        if (duplicatesOnly) {
-            echo("### ==== Duplicate Files in DB ==== ###")
-            val duplicates = service.findDuplicates(snapshot.id.value)
-            if (duplicates.isEmpty()) {
-                echo("No duplicates found.")
-            } else {
-                duplicates.forEach { record ->
-                    echo("snapshot=${record.snapshotId} size=${record.size} path=${record.path} rank=${record.duplicateRank} hash=${record.hash}")
+/**
+ * Clikt subcommand for querying an already existing/computed database.
+ */
+class DbCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null
+) : CliktCommand(
+    name = "db"
+) {
+    override val invokeWithoutSubcommand: Boolean = true
+
+    override fun help(context: Context): String =
+        "Query an already existing/computed database."
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val snapshotIdOption: Int? by option(
+        "-s", "--snapshot",
+        help = "Optional snapshot ID to query. Defaults to the latest snapshot."
+    ).int()
+
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
+    override fun run() {
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
+
+        if (currentContext.invokedSubcommand == null) {
+            val resolvedDbPath = dbPath ?: dbOption
+            val repoDb = when {
+                resolvedDbPath != null -> {
+                    if (serviceFactory == null) validateDatabaseFileExists(resolvedDbPath)
+                    DatabaseFactory.connectFile(resolvedDbPath.toString())
                 }
+                serviceFactory != null -> DatabaseFactory.connectInMemory("test")
+                else -> throw UsageError("Database must be specified as an argument or via --db")
             }
 
-            val elapsedNanos = System.nanoTime() - startTime
-            val duration = elapsedNanos.nanoseconds
-            val stats = service.computeDuplicateStatistics(snapshot.id.value, duration)
-            service.printDuplicateStatistics(stats) { echo(it) }
-        } else {
+            val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
+            val snapshot = resolveSnapshot(service, snapshotIdOption)
+            if (snapshot == null) {
+                echo("No snapshots found in database.")
+                return
+            }
+
             service.printQueryResults(snapshot.id.value) { echo(it) }
         }
+    }
+}
+
+/**
+ * Clikt subcommand for querying the database for the latest snapshot and printing duplicate files and statistics.
+ */
+class PrintDuplicatesCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null
+) : CliktCommand(
+    name = "print-duplicates"
+) {
+    override fun help(context: Context): String =
+        "Query the provided database for the latest snapshot and print duplicate files and statistics."
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val snapshotIdOption: Int? by option(
+        "-s", "--snapshot",
+        help = "Optional snapshot ID to query. Defaults to the latest snapshot."
+    ).int()
+
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
+    override fun run() {
+        val startTime = System.nanoTime()
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
+
+        val parentDb = (currentContext.parent?.command as? DbCommand)?.let { it.dbPath ?: it.dbOption }
+        val resolvedDbPath = dbPath ?: dbOption ?: parentDb
+
+        val repoDb = when {
+            resolvedDbPath != null -> {
+                if (serviceFactory == null) validateDatabaseFileExists(resolvedDbPath)
+                DatabaseFactory.connectFile(resolvedDbPath.toString())
+            }
+            serviceFactory != null -> DatabaseFactory.connectInMemory("test")
+            else -> throw UsageError("Database must be specified as an argument or via --db")
+        }
+
+        val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
+        val snapshot = resolveSnapshot(service, snapshotIdOption)
+        if (snapshot == null) {
+            echo("No snapshots found in database.")
+            return
+        }
+
+        echo("### ==== Duplicate Files in DB ==== ###")
+        val duplicates = service.findDuplicates(snapshot.id.value)
+        if (duplicates.isEmpty()) {
+            echo("No duplicates found.")
+        } else {
+            duplicates.forEach { record ->
+                echo("snapshot=${record.snapshotId} size=${record.size} path=${record.path} rank=${record.duplicateRank} hash=${record.hash}")
+            }
+        }
+
+        val elapsedNanos = System.nanoTime() - startTime
+        val duration = elapsedNanos.nanoseconds
+        val stats = service.computeDuplicateStatistics(snapshot.id.value, duration)
+        service.printDuplicateStatistics(stats) { echo(it) }
     }
 }
 

@@ -30,6 +30,7 @@ import java.nio.file.Path
 import java.util.Locale
 import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.time.Duration
+import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.alias
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.dao.id.EntityID
@@ -210,6 +211,27 @@ class BovedaService(
      */
     fun completeSnapshot(snapshot: RepoSnapshot) = transaction(database) {
         snapshot.isCompleted = true
+    }
+
+    /**
+     * Retrieves the latest directory snapshot from the database, prioritizing completed snapshots.
+     */
+    fun getLatestSnapshot(): RepoSnapshot? = transaction(database) {
+        RepoSnapshot.find { RepoSnapshots.isCompleted eq true }
+            .orderBy(RepoSnapshots.id to SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?: RepoSnapshot.all()
+                .orderBy(RepoSnapshots.id to SortOrder.DESC)
+                .limit(1)
+                .firstOrNull()
+    }
+
+    /**
+     * Finds a snapshot by its [snapshotId].
+     */
+    fun findSnapshot(snapshotId: Int): RepoSnapshot? = transaction(database) {
+        RepoSnapshot.findById(snapshotId)
     }
 
     /**
