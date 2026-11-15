@@ -68,8 +68,8 @@ class ScanCommand(
   val algorithm: String by option(
     "-a",
     "--algorithm",
-    help = "Cryptographic hashing algorithm (e.g. MD5, SHA-256, SHA-512). Default is MD5."
-  ).default("MD5")
+    help = "File hashing algorithm (e.g. XXH3, MD5, SHA-256, SHA-512). Default is XXH3."
+  ).default("XXH3")
 
   val quiet: Boolean by option(
     "-q",

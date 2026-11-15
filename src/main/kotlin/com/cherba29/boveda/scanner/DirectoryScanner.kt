@@ -17,7 +17,7 @@ interface DirectoryScanner {
   /**
    * Recursively scans [rootPath] and yields a [Sequence] of [ScannedFile] entries.
    */
-  fun scan(rootPath: Path, algorithm: String = "MD5"): Sequence<ScannedFile>
+  fun scan(rootPath: Path, algorithm: String = "XXH3"): Sequence<ScannedFile>
 
   /**
    * Recursively scans [rootPath] and yields a [Sequence] of [ScannedFile] entries.
@@ -26,7 +26,7 @@ interface DirectoryScanner {
    */
   fun scan(
     rootPath: Path,
-    algorithm: String = "MD5",
+    algorithm: String = "XXH3",
     shouldSkip: ((DiscoveredFile) -> Boolean)? = null
   ): Sequence<ScannedFile> = if (shouldSkip == null) {
     scan(rootPath, algorithm)

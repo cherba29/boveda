@@ -13,6 +13,53 @@ class FileHasherTest {
   private val hasher = MessageDigestFileHasher()
 
   @Test
+  fun `computeHash defaults to XXH3 and produces correct hash for empty content`() {
+    val tempFile = Files.createTempFile("hasher-test-default-empty", ".txt").toFile()
+    try {
+      val hash = hasher.computeHash(tempFile)
+      assertEquals("2d06800538d394c2", hash)
+    } finally {
+      tempFile.delete()
+    }
+  }
+
+  @Test
+  fun `computeHash returns correct XXH3 for empty input stream`() {
+    val stream = ByteArrayInputStream(ByteArray(0))
+    val hash = hasher.computeHash(stream, "XXH3")
+    assertEquals("2d06800538d394c2", hash)
+  }
+
+  @Test
+  fun `computeHash returns correct XXH3_128 for empty file`() {
+    val tempFile = Files.createTempFile("hasher-test-empty-128", ".txt").toFile()
+    try {
+      val hash = hasher.computeHash(tempFile, "XXH3_128")
+      assertEquals("99aa06d3014798d86001c324468d497f", hash)
+    } finally {
+      tempFile.delete()
+    }
+  }
+
+  @Test
+  fun `computeHash returns correct XXH3 for known text`() {
+    val tempFile = Files.createTempFile("hasher-test-xxh3", ".txt").toFile()
+    try {
+      tempFile.writeText("hello world")
+      val hashDefault = hasher.computeHash(tempFile)
+      val hashExplicit = hasher.computeHash(tempFile, "XXH3")
+      val hashCase = hasher.computeHash(tempFile, "xxh3_64")
+      val hashDash = hasher.computeHash(tempFile, "xxh3-64")
+      assertEquals(hashDefault, hashExplicit)
+      assertEquals(hashDefault, hashCase)
+      assertEquals(hashDefault, hashDash)
+      assertEquals(16, hashDefault.length)
+    } finally {
+      tempFile.delete()
+    }
+  }
+
+  @Test
   fun `computeHash returns correct MD5 for known text`() {
     val tempFile = Files.createTempFile("hasher-test", ".txt").toFile()
     try {

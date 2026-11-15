@@ -3,6 +3,7 @@ clikt = "5.0.3"
 exposed = "1.0.0-rc-4"
 graalvm = "0.11.3"
 h2 = "2.2.224"
+hash4j = "0.31.0"
 kotest = "6.0.7"
 ktlint = "12.2.0"
 logback = "1.5.21"
@@ -20,6 +21,7 @@ guava = { module = "com.google.guava:guava", version = "33.5.0-jre" }
 guice = { module = "com.google.inject:guice", version = "7.0.0" }
 guice-testlib = { module = "com.google.inject.extensions:guice-testlib", version = "7.0.0" }
 h2 = { module = "com.h2database:h2", version.ref = "h2" }
+hash4j = { module = "com.dynatrace.hash4j:hash4j", version.ref = "hash4j" }
 kotest = { module = "io.kotest:kotest-framework-engine", version.ref = "kotest"}
 kotest-jvm = { module = "io.kotest:kotest-framework-engine-jvm", version.ref = "kotest"}
 kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest"}

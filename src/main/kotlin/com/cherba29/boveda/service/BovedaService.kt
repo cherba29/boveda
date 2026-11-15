@@ -363,7 +363,7 @@ class BovedaService(
    */
   fun scanAndRecord(
     rootPath: Path,
-    algorithm: String = "MD5",
+    algorithm: String = "XXH3",
     resumeSnapshotId: Int? = null,
     onFileScanned: ((ScannedFile) -> Unit)? = null
   ): RepoSnapshot {

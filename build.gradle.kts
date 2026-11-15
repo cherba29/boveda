@@ -42,6 +42,7 @@ dependencies {
   implementation(libs.guice)
   implementation(libs.guice.testlib)
   implementation(libs.h2)
+  implementation(libs.hash4j)
   implementation(libs.logback.classic)
   implementation(libs.logback.core)
   implementation(libs.mordant.core)
