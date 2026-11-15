@@ -5,10 +5,13 @@ import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.progress.MordantScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
+import com.cherba29.boveda.scanner.DirectoryMetadataScanner
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
+import com.cherba29.boveda.scanner.FileTreeMetadataScanner
 import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
+import com.cherba29.boveda.scanner.WorkStealingMetadataScanner
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -31,7 +34,8 @@ import org.jetbrains.exposed.v1.jdbc.Database
  */
 class ScanCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null,
-  private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
+  private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null,
+  private val metadataScannerFactory: ((Int) -> DirectoryMetadataScanner)? = null
 ) : CliktCommand(
   name = "scan"
 ) {
@@ -151,13 +155,28 @@ class ScanCommand(
       warmUpCache = !noCacheWarmup
     )
 
+    val metadataScanner: DirectoryMetadataScanner = metadataScannerFactory?.invoke(threads)
+      ?: if (threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true)) {
+        FileTreeMetadataScanner
+      } else {
+        WorkStealingMetadataScanner(parallelism = threads)
+      }
+
+    echo("Scanning directory: $directory")
+    val metadata = metadataScanner.scan(directory)
+
     val progressIndicator: ScanProgressIndicator? = if (quiet) {
-      progressIndicatorFactory?.invoke(terminal) ?: MordantScanProgressIndicator(terminal)
+      val indicator = progressIndicatorFactory?.invoke(terminal)
+        ?: MordantScanProgressIndicator(
+          terminal = terminal,
+          totalFiles = metadata.fileCount,
+          totalBytes = metadata.totalBytes
+        )
+      indicator.apply { setTotals(metadata.fileCount, metadata.totalBytes) }
     } else {
       null
     }
 
-    echo("Scanning directory: $directory")
     try {
       service.scanAndRecord(directory, algorithm = algorithm) { file ->
         if (!quiet) {

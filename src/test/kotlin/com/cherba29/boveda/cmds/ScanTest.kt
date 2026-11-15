@@ -2,8 +2,13 @@ package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.progress.ScanProgressIndicator
+import com.cherba29.boveda.scanner.DirectoryMetadata
+import com.cherba29.boveda.scanner.DirectoryMetadataScanner
+import com.cherba29.boveda.scanner.ScannedFile
 import com.github.ajalt.clikt.testing.test
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.io.path.writeText
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -161,6 +166,58 @@ class ScanTest {
 
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("sample.txt"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command invokes metadata scanner before scanning and passes totals to progress indicator`() {
+    val tempDir = Files.createTempDirectory("scan-meta-dir")
+    val dbDir = Files.createTempDirectory("scan-meta-db")
+    try {
+      tempDir.resolve("item1.txt").writeText("content 1")
+      tempDir.resolve("item2.txt").writeText("content 2")
+      val dbFile = dbDir.resolve("meta_db")
+
+      var scannedDir: Path? = null
+      var configuredTotalFiles: Long? = null
+      var configuredTotalBytes: Long? = null
+      var processedFilesCount = 0
+
+      val mockMetadataScanner = object : DirectoryMetadataScanner {
+        override fun scan(rootPath: Path): DirectoryMetadata {
+          scannedDir = rootPath
+          return DirectoryMetadata(fileCount = 2L, totalBytes = 18L)
+        }
+      }
+
+      val mockIndicator = object : ScanProgressIndicator {
+        override fun setTotals(totalFiles: Long?, totalBytes: Long?) {
+          configuredTotalFiles = totalFiles
+          configuredTotalBytes = totalBytes
+        }
+
+        override fun onFileProcessed(file: ScannedFile) {
+          processedFilesCount++
+        }
+
+        override fun finish() {}
+      }
+
+      val command = ScanCommand(
+        progressIndicatorFactory = { mockIndicator },
+        metadataScannerFactory = { mockMetadataScanner }
+      )
+
+      val result = command.test(listOf("--quiet", tempDir.toString(), dbFile.toString()))
+
+      assertEquals(0, result.statusCode)
+      assertEquals(tempDir, scannedDir)
+      assertEquals(2L, configuredTotalFiles)
+      assertEquals(18L, configuredTotalBytes)
+      assertEquals(2, processedFilesCount)
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

@@ -9,6 +9,7 @@ import java.nio.file.attribute.FileTime
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ScanProgressIndicatorTest {
@@ -126,8 +127,87 @@ class ScanProgressIndicatorTest {
   }
 
   @Test
+  fun `ScanProgressState computes percentage, etaSeconds, and formats eta correctly`() {
+    // 50 MB processed out of 100 MB over 5 seconds (10 MB/s speed -> 5s ETA)
+    val state = ScanProgressState(
+      filesProcessed = 50L,
+      bytesProcessed = 50_000_000L,
+      totalFiles = 100L,
+      totalBytes = 100_000_000L,
+      startTimeNanos = 0L,
+      timeProvider = { 5_000_000_000L }
+    )
+
+    assertEquals(50.0, state.percentage)
+    assertEquals(5.0, state.etaSeconds)
+    assertEquals("eta 00:05", state.formattedEta)
+    assertEquals("50 / 100 files", state.formattedFiles)
+    assertEquals("47.68 MB / 95.37 MB", state.formattedStorage)
+
+    // Indeterminate totals
+    val indeterminate = ScanProgressState(
+      filesProcessed = 10L,
+      bytesProcessed = 1_000L,
+      totalFiles = null,
+      totalBytes = null,
+      startTimeNanos = 0L,
+      timeProvider = { 1_000_000_000L }
+    )
+    assertNull(indeterminate.percentage)
+    assertNull(indeterminate.etaSeconds)
+    assertEquals("eta --:--", indeterminate.formattedEta)
+
+    // Zero totals
+    val zeroTotals = ScanProgressState(
+      filesProcessed = 0L,
+      bytesProcessed = 0L,
+      totalFiles = 0L,
+      totalBytes = 0L,
+      startTimeNanos = 0L,
+      timeProvider = { 1_000_000_000L }
+    )
+    assertEquals(100.0, zeroTotals.percentage)
+    assertEquals(0.0, zeroTotals.etaSeconds)
+    assertEquals("eta 00:00", zeroTotals.formattedEta)
+
+    // Multi-hour ETA: 3,665,000 bytes remaining at 1,000 bytes/s -> 3665s = 1h 1m 5s
+    val hoursState = ScanProgressState(
+      filesProcessed = 1L,
+      bytesProcessed = 1_000L,
+      totalFiles = 2L,
+      totalBytes = 3_666_000L,
+      startTimeNanos = 0L,
+      timeProvider = { 1_000_000_000L }
+    )
+    assertEquals("eta 1:01:05", hoursState.formattedEta)
+  }
+
+  @Test
+  fun `MordantScanProgressIndicator setTotals dynamically updates state`() {
+    val recorder = TerminalRecorder(outputInteractive = false)
+    val terminal = Terminal(terminalInterface = recorder)
+    var currentTime = 10_000_000_000L
+
+    val indicator = MordantScanProgressIndicator(
+      terminal = terminal,
+      totalFiles = null,
+      totalBytes = null,
+      timeProvider = { currentTime }
+    )
+    indicator.setTotals(totalFiles = 10L, totalBytes = 10_000L)
+    indicator.onFileProcessed(dummyFile(size = 5_000L, pathStr = "chunk.bin"))
+
+    currentTime += 1_000_000_000L
+    indicator.finish()
+
+    val output = recorder.output()
+    assertTrue(output.contains("Scanned 1 file"))
+  }
+
+  @Test
   fun `NoOpScanProgressIndicator executes without errors`() {
     val indicator = NoOpScanProgressIndicator()
+    indicator.setTotals(10L, 1000L)
     indicator.onFileProcessed(dummyFile(size = 100))
     indicator.finish()
     indicator.close()
