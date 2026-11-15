@@ -40,4 +40,5 @@ class RepoFileInstance(id: EntityID<Int>) : IntEntity(id) {
   var snapshot by RepoSnapshot referencedOn RepoFileInstances.snapshot
   var file by RepoFile referencedOn RepoFileInstances.file
   var path by RepoFileInstances.path
+  var timestamp by RepoFileInstances.timestamp
 }

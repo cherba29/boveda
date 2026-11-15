@@ -29,4 +29,5 @@ object RepoFileInstances : IntIdTable("file_instances") {
   val snapshot = reference("snapshot_id", RepoSnapshots)
   val file = reference("file_id", RepoFiles)
   val path = varchar("path", 1024)
+  val timestamp = long("timestamp").nullable()
 }

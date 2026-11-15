@@ -97,7 +97,8 @@ class WorkStealingDirectoryScanner(
     private val algorithm: String,
     private val hasher: FileHasher,
     private val resultQueue: BlockingQueue<ResultItem>,
-    private val fileChunkSize: Int
+    private val fileChunkSize: Int,
+    private val shouldSkip: ((DiscoveredFile) -> Boolean)? = null
   ) : RecursiveAction() {
 
     override fun compute() {
@@ -120,7 +121,8 @@ class WorkStealingDirectoryScanner(
                   algorithm = algorithm,
                   hasher = hasher,
                   resultQueue = resultQueue,
-                  fileChunkSize = fileChunkSize
+                  fileChunkSize = fileChunkSize,
+                  shouldSkip = shouldSkip
                 )
               )
             } else if (Files.isRegularFile(normalizedEntry)) {
@@ -142,14 +144,15 @@ class WorkStealingDirectoryScanner(
               } catch (_: Exception) {
                 null
               }
-              discoveredFiles.add(
-                DiscoveredFile(
-                  path = normalizedEntry,
-                  relativePath = relativePath,
-                  size = size,
-                  lastModifiedTime = lastModified
-                )
+              val discovered = DiscoveredFile(
+                path = normalizedEntry,
+                relativePath = relativePath,
+                size = size,
+                lastModifiedTime = lastModified
               )
+              if (shouldSkip == null || !shouldSkip(discovered)) {
+                discoveredFiles.add(discovered)
+              }
             }
           }
         }
@@ -186,7 +189,14 @@ class WorkStealingDirectoryScanner(
     }
   }
 
-  override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> {
+  override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
+    scan(rootPath, algorithm, shouldSkip = null)
+
+  override fun scan(
+    rootPath: Path,
+    algorithm: String,
+    shouldSkip: ((DiscoveredFile) -> Boolean)?
+  ): Sequence<ScannedFile> {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
@@ -209,7 +219,8 @@ class WorkStealingDirectoryScanner(
         algorithm = algorithm,
         hasher = hasher,
         resultQueue = resultQueue,
-        fileChunkSize = fileChunkSize
+        fileChunkSize = fileChunkSize,
+        shouldSkip = shouldSkip
       )
 
       val rootFuture = pool.submit(rootTask)

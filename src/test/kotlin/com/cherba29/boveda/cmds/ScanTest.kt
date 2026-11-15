@@ -1,14 +1,21 @@
 package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
+import com.cherba29.boveda.db.DatabaseFactory
+import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.scanner.DirectoryMetadata
 import com.cherba29.boveda.scanner.DirectoryMetadataScanner
+import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
+import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.testing.test
+import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.io.path.getLastModifiedTime
 import kotlin.io.path.writeText
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -32,6 +39,7 @@ class ScanTest {
     assertTrue(result.output.contains("Usage: scan"))
     assertTrue(result.output.contains("<directory>"))
     assertTrue(result.output.contains("<database>"))
+    assertTrue(result.output.contains("--continue"))
     assertTrue(result.output.contains("--algorithm"))
     assertTrue(result.output.contains("--db"))
     assertTrue(result.output.contains("--quiet"))
@@ -218,6 +226,167 @@ class ScanTest {
       assertEquals(2L, configuredTotalFiles)
       assertEquals(18L, configuredTotalBytes)
       assertEquals(2, processedFilesCount)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command fails when neither directory nor continue option is specified`() {
+    val dbDir = Files.createTempDirectory("scan-no-dir-db")
+    try {
+      val dbFile = dbDir.resolve("test_db")
+      val command = ScanCommand()
+      val result = command.test(listOf("-d", dbFile.toString()))
+
+      assertNotEquals(0, result.statusCode)
+      assertTrue(result.output.contains("DIRECTORY must be specified"))
+    } finally {
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with continue fails when snapshot does not exist`() {
+    val dbDir = Files.createTempDirectory("scan-nonexistent-snap-db")
+    try {
+      val dbFile = dbDir.resolve("test_db")
+      DatabaseFactory.connectFile(dbFile.toString())
+
+      val command = ScanCommand()
+      val result = command.test(listOf("-c", "999", "-d", dbFile.toString()))
+
+      assertNotEquals(0, result.statusCode)
+      assertTrue(result.output.contains("Snapshot not found: 999"))
+    } finally {
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with continue fails when snapshot is already completed`() {
+    val tempDir = Files.createTempDirectory("scan-completed-dir")
+    val dbDir = Files.createTempDirectory("scan-completed-db")
+    try {
+      tempDir.resolve("doc.txt").writeText("completed content")
+      val dbFile = dbDir.resolve("test_db")
+      val db = DatabaseFactory.connectFile(dbFile.toString())
+      val service = BovedaService(database = db)
+      val snapshot = service.scanAndRecord(tempDir)
+
+      val command = ScanCommand()
+      val result = command.test(
+        listOf("-c", snapshot.id.value.toString(), "-d", dbFile.toString())
+      )
+
+      assertNotEquals(0, result.statusCode)
+      assertTrue(result.output.contains("already completed"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with continue resumes incomplete snapshot without specifying directory`() {
+    val tempDir = Files.createTempDirectory("scan-resume-dir")
+    val dbDir = Files.createTempDirectory("scan-resume-db")
+    try {
+      val fileA = tempDir.resolve("fileA.txt")
+      fileA.writeText("content of file A")
+      val fileB = tempDir.resolve("fileB.txt")
+      fileB.writeText("content of file B")
+
+      val dbFile = dbDir.resolve("resume_db")
+      val db = DatabaseFactory.connectFile(dbFile.toString())
+      val service = BovedaService(database = db)
+
+      val snapshot = service.createSnapshot(tempDir)
+      val scannedA = ScannedFile(
+        path = fileA,
+        relativePath = "fileA.txt",
+        size = Files.size(fileA),
+        hash = "hashA123",
+        lastModifiedTime = fileA.getLastModifiedTime()
+      )
+      service.recordFile(snapshot, scannedA)
+
+      val command = ScanCommand()
+      val result = command.test(
+        listOf("--continue", snapshot.id.value.toString(), dbFile.toString())
+      )
+
+      assertEquals(0, result.statusCode)
+      assertTrue(result.output.contains("Scanning directory: $tempDir"))
+
+      val updatedSnapshot = service.findSnapshot(snapshot.id.value)
+      assertEquals(true, updatedSnapshot?.isCompleted)
+
+      val entries = service.getSnapshotFileEntries(snapshot.id.value)
+      assertEquals(2, entries.size)
+      assertTrue(entries.keys.any { it.endsWith("fileA.txt") })
+      assertTrue(entries.keys.any { it.endsWith("fileB.txt") })
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with continue skips already processed unchanged files without recomputing hash`() {
+    val tempDir = Files.createTempDirectory("scan-skip-dir")
+    val dbDir = Files.createTempDirectory("scan-skip-db")
+    try {
+      val file1 = tempDir.resolve("file1.txt")
+      file1.writeText("unchanged content")
+      val file2 = tempDir.resolve("file2.txt")
+      file2.writeText("initial content")
+
+      val dbFile = dbDir.resolve("skip_db")
+      val db = DatabaseFactory.connectFile(dbFile.toString())
+      val service = BovedaService(database = db)
+
+      val snapshot = service.createSnapshot(tempDir)
+      val scanned1 = ScannedFile(
+        path = file1,
+        relativePath = "file1.txt",
+        size = Files.size(file1),
+        hash = "hash1_valid",
+        lastModifiedTime = file1.getLastModifiedTime()
+      )
+      service.recordFile(snapshot, scanned1)
+
+      file2.writeText("modified content which changed the size")
+
+      val hashedFiles = mutableListOf<String>()
+      val spyHasher = object : FileHasher {
+        override fun computeHash(file: File, algorithm: String): String {
+          hashedFiles.add(file.name)
+          return "computed_hash_${file.name}"
+        }
+
+        override fun computeHash(inputStream: InputStream, algorithm: String): String =
+          "computed_hash_stream"
+      }
+
+      val customScanner = FileTreeDirectoryScanner(hasher = spyHasher)
+      val customServiceFactory: (org.jetbrains.exposed.v1.jdbc.Database) -> BovedaService = { d ->
+        BovedaService(database = d, scanner = customScanner)
+      }
+
+      val command = ScanCommand(serviceFactory = customServiceFactory)
+      val result = command.test(
+        listOf("--continue", snapshot.id.value.toString(), "-d", dbFile.toString())
+      )
+
+      assertEquals(0, result.statusCode)
+
+      assertTrue(
+        !hashedFiles.contains("file1.txt"),
+        "file1.txt should have been skipped without hashing"
+      )
+      assertTrue(hashedFiles.contains("file2.txt"), "file2.txt should have been hashed")
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

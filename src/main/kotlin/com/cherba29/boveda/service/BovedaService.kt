@@ -19,6 +19,7 @@ import com.cherba29.boveda.model.formatBytes
 import com.cherba29.boveda.model.formatBytesShort
 import com.cherba29.boveda.model.formatDuration
 import com.cherba29.boveda.scanner.DirectoryScanner
+import com.cherba29.boveda.scanner.DiscoveredFile
 import com.cherba29.boveda.scanner.ScannedFile
 import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 import com.github.ajalt.mordant.rendering.BorderType
@@ -109,6 +110,7 @@ class BovedaService(
         this.snapshot = snapshot
         this.file = repoFile
         this.path = scannedFile.path.invariantSeparatorsPathString
+        this.timestamp = scannedFile.lastModifiedTime?.toMillis()
       }
     }
 
@@ -116,10 +118,24 @@ class BovedaService(
    * Ingests a batch of [ScannedFile]s under [snapshot] in a single transaction,
    * utilizing the in-memory cache and batch inserts for high throughput.
    */
-  fun recordBatch(snapshot: RepoSnapshot, batch: List<ScannedFile>) {
+  fun recordBatch(
+    snapshot: RepoSnapshot,
+    batch: List<ScannedFile>,
+    existingEntriesToUpdate: Set<String>? = null
+  ) {
     if (batch.isEmpty()) return
 
     transaction(database) {
+      if (!existingEntriesToUpdate.isNullOrEmpty()) {
+        val pathsInBatch = batch.map { it.path.invariantSeparatorsPathString }
+        val toDelete = pathsInBatch.filter { it in existingEntriesToUpdate }
+        if (toDelete.isNotEmpty()) {
+          RepoFileInstances.deleteWhere {
+            (RepoFileInstances.snapshot eq snapshot.id) and (RepoFileInstances.path inList toDelete)
+          }
+        }
+      }
+
       if (!deduplicateFiles) {
         val insertedFiles = RepoFiles.batchInsert(
           batch,
@@ -136,6 +152,7 @@ class BovedaService(
           this[RepoFileInstances.snapshot] = snapshot.id
           this[RepoFileInstances.file] = fileRow[RepoFiles.id]
           this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
+          this[RepoFileInstances.timestamp] = file.lastModifiedTime?.toMillis()
         }
         return@transaction
       }
@@ -186,6 +203,7 @@ class BovedaService(
         this[RepoFileInstances.snapshot] = snapshot.id
         this[RepoFileInstances.file] = entityId
         this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
+        this[RepoFileInstances.timestamp] = file.lastModifiedTime?.toMillis()
       }
     }
   }
@@ -193,17 +211,21 @@ class BovedaService(
   /**
    * Records a sequence of [files] under [snapshot] in batches of [batchSize].
    */
-  fun recordFiles(snapshot: RepoSnapshot, files: Sequence<ScannedFile>) {
+  fun recordFiles(
+    snapshot: RepoSnapshot,
+    files: Sequence<ScannedFile>,
+    existingEntriesToUpdate: Set<String>? = null
+  ) {
     val buffer = ArrayList<ScannedFile>(batchSize)
     for (file in files) {
       buffer.add(file)
       if (buffer.size >= batchSize) {
-        recordBatch(snapshot, buffer)
+        recordBatch(snapshot, buffer, existingEntriesToUpdate)
         buffer.clear()
       }
     }
     if (buffer.isNotEmpty()) {
-      recordBatch(snapshot, buffer)
+      recordBatch(snapshot, buffer, existingEntriesToUpdate)
       buffer.clear()
     }
   }
@@ -211,8 +233,11 @@ class BovedaService(
   /**
    * Records an iterable collection of [files] under [snapshot] in batches of [batchSize].
    */
-  fun recordFiles(snapshot: RepoSnapshot, files: Iterable<ScannedFile>) =
-    recordFiles(snapshot, files.asSequence())
+  fun recordFiles(
+    snapshot: RepoSnapshot,
+    files: Iterable<ScannedFile>,
+    existingEntriesToUpdate: Set<String>? = null
+  ) = recordFiles(snapshot, files.asSequence(), existingEntriesToUpdate)
 
   /**
    * Marks [snapshot] as completed.
@@ -287,24 +312,102 @@ class BovedaService(
   }
 
   /**
+   * Retrieves all file instances recorded in [snapshotId] mapped by their normalized path.
+   */
+  fun getSnapshotFileEntries(snapshotId: Int): Map<String, SnapshotFileEntry> =
+    transaction(database) {
+      val join = RepoFileInstances innerJoin RepoFiles
+      join.select(
+        RepoFileInstances.id,
+        RepoFileInstances.path,
+        RepoFileInstances.timestamp,
+        RepoFiles.id,
+        RepoFiles.size,
+        RepoFiles.hash
+      ).where { RepoFileInstances.snapshot eq snapshotId }
+        .associate { row ->
+          val pathStr = row[RepoFileInstances.path]
+          pathStr to SnapshotFileEntry(
+            instanceId = row[RepoFileInstances.id],
+            path = pathStr,
+            size = row[RepoFiles.size],
+            timestamp = row[RepoFileInstances.timestamp],
+            hash = row[RepoFiles.hash],
+            fileId = row[RepoFiles.id]
+          )
+        }
+    }
+
+  /**
+   * Checks whether a discovered file matches an already recorded snapshot entry in path, name,
+   * timestamp, and size without content modifications.
+   */
+  fun isUnchanged(discovered: DiscoveredFile, existing: SnapshotFileEntry): Boolean {
+    val samePath = existing.path == discovered.path.invariantSeparatorsPathString
+    val sameName = Path.of(existing.path).fileName?.toString() ==
+      discovered.path.fileName?.toString()
+    val sameSize = existing.size == discovered.size
+    val sameTimestamp = if (existing.timestamp == null) {
+      discovered.lastModifiedTime == null
+    } else {
+      discovered.lastModifiedTime != null &&
+        existing.timestamp == discovered.lastModifiedTime.toMillis()
+    }
+    return samePath && sameName && sameSize && sameTimestamp
+  }
+
+  /**
    * Scans [rootPath], records each discovered file in the database in batches, and marks the snapshot complete.
+   * If [resumeSnapshotId] is provided, resumes the incomplete snapshot by skipping already processed,
+   * unchanged files and only hashing and recording new or modified files.
    */
   fun scanAndRecord(
     rootPath: Path,
     algorithm: String = "MD5",
+    resumeSnapshotId: Int? = null,
     onFileScanned: ((ScannedFile) -> Unit)? = null
   ): RepoSnapshot {
     if (deduplicateFiles && warmUpCache) {
       cache.warmUp(database)
     }
 
-    val snapshot = createSnapshot(rootPath)
+    val snapshot = if (resumeSnapshotId != null) {
+      val existing = findSnapshot(resumeSnapshotId)
+        ?: throw IllegalArgumentException("Snapshot not found: $resumeSnapshotId")
+      require(!existing.isCompleted) {
+        "Snapshot $resumeSnapshotId is already completed. " +
+          "Only incomplete snapshots can be continued."
+      }
+      existing
+    } else {
+      createSnapshot(rootPath)
+    }
 
-    val scannedFiles = scanner.scan(rootPath, algorithm).onEach { file ->
+    val existingEntries = if (resumeSnapshotId != null) {
+      getSnapshotFileEntries(resumeSnapshotId)
+    } else {
+      emptyMap()
+    }
+
+    val shouldSkip: (DiscoveredFile) -> Boolean = { discovered ->
+      val existing = existingEntries[discovered.path.invariantSeparatorsPathString]
+      existing != null && isUnchanged(discovered, existing)
+    }
+
+    val scannedFiles = scanner.scan(
+      rootPath = rootPath,
+      algorithm = algorithm,
+      shouldSkip = if (resumeSnapshotId != null) shouldSkip else null
+    ).onEach { file ->
       onFileScanned?.invoke(file)
     }
 
-    recordFiles(snapshot, scannedFiles)
+    if (resumeSnapshotId != null && existingEntries.isNotEmpty()) {
+      recordFiles(snapshot, scannedFiles, existingEntriesToUpdate = existingEntries.keys)
+    } else {
+      recordFiles(snapshot, scannedFiles)
+    }
+
     completeSnapshot(snapshot)
     return snapshot
   }
@@ -756,3 +859,15 @@ class BovedaService(
     out("")
   }
 }
+
+/**
+ * Representation of an already recorded file instance inside a snapshot.
+ */
+data class SnapshotFileEntry(
+  val instanceId: EntityID<Int>,
+  val path: String,
+  val size: Long,
+  val timestamp: Long?,
+  val hash: String,
+  val fileId: EntityID<Int>
+)

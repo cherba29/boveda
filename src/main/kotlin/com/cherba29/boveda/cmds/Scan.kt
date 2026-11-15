@@ -26,6 +26,7 @@ import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import com.github.ajalt.mordant.terminal.Terminal
+import java.nio.file.Files
 import java.nio.file.Path
 import org.jetbrains.exposed.v1.jdbc.Database
 
@@ -42,15 +43,16 @@ class ScanCommand(
   override fun help(context: Context): String =
     "Scan directory and populate the target database with file fingerprints."
 
-  val directory: Path by argument(
+  val continueSnapshotId: Int? by option(
+    "-c",
+    "--continue",
+    help = "Resume an incomplete directory scan for the given snapshot ID."
+  ).int()
+
+  val directory: Path? by argument(
     name = "DIRECTORY",
-    help = "Directory path to scan."
-  ).path(
-    mustExist = true,
-    canBeFile = false,
-    canBeDir = true,
-    mustBeReadable = true
-  )
+    help = "Directory path to scan (optional when --continue is provided)."
+  ).path().optional()
 
   val dbPath: Path? by argument(
     name = "DATABASE",
@@ -124,12 +126,39 @@ class ScanCommand(
     ignoreCase = true
   )
 
+  private fun validateScanDirectory(path: Path): Path {
+    if (!Files.exists(path)) {
+      throw UsageError("Invalid value for \"<directory>\": directory \"$path\" does not exist.")
+    }
+    if (!Files.isDirectory(path)) {
+      throw UsageError("Invalid value for \"<directory>\": directory \"$path\" is a file.")
+    }
+    if (!Files.isReadable(path)) {
+      throw UsageError("Invalid value for \"<directory>\": directory \"$path\" is not readable.")
+    }
+    return path.normalize()
+  }
+
   override fun run() {
     logLevel?.let { LoggingConfig.setRootLevel(it) }
 
-    val resolvedDbPath = dbPath ?: dbOption
+    val continueId = continueSnapshotId
+    val (rawDirectory, rawDbPath) = if (continueId != null) {
+      if (dbOption != null) {
+        directory to dbOption
+      } else if (directory != null && dbPath != null) {
+        directory to dbPath
+      } else if (directory != null && dbPath == null) {
+        null to directory
+      } else {
+        null to null
+      }
+    } else {
+      directory to (dbPath ?: dbOption)
+    }
+
     val repoDb = when {
-      resolvedDbPath != null -> DatabaseFactory.connectFile(resolvedDbPath.toString())
+      rawDbPath != null -> DatabaseFactory.connectFile(rawDbPath.toString())
       serviceFactory != null -> DatabaseFactory.connectInMemory("test")
       else -> throw UsageError("Target database must be specified as an argument or via --db")
     }
@@ -155,6 +184,22 @@ class ScanCommand(
       warmUpCache = !noCacheWarmup
     )
 
+    val targetDirectory: Path = if (continueId != null) {
+      val snapshot = service.findSnapshot(continueId)
+        ?: throw UsageError("Snapshot not found: $continueId")
+      if (snapshot.isCompleted) {
+        throw UsageError(
+          "Snapshot $continueId is already completed. Only incomplete snapshots can be continued."
+        )
+      }
+      val rootDir = rawDirectory ?: Path.of(snapshot.rootPath)
+      validateScanDirectory(rootDir)
+    } else {
+      val dir = rawDirectory
+        ?: throw UsageError("DIRECTORY must be specified when not continuing an existing snapshot.")
+      validateScanDirectory(dir)
+    }
+
     val metadataScanner: DirectoryMetadataScanner = metadataScannerFactory?.invoke(threads)
       ?: if (threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true)) {
         FileTreeMetadataScanner
@@ -162,23 +207,44 @@ class ScanCommand(
         WorkStealingMetadataScanner(parallelism = threads)
       }
 
-    echo("Scanning directory: $directory")
-    val metadata = metadataScanner.scan(directory)
+    echo("Scanning directory: $targetDirectory")
+    val metadata = metadataScanner.scan(targetDirectory)
+
+    val existingEntries = if (continueId != null) {
+      service.getSnapshotFileEntries(continueId)
+    } else {
+      emptyMap()
+    }
+    val initialFiles = existingEntries.size.toLong()
+    val initialBytes = existingEntries.values.sumOf { it.size }
 
     val progressIndicator: ScanProgressIndicator? = if (quiet) {
       val indicator = progressIndicatorFactory?.invoke(terminal)
         ?: MordantScanProgressIndicator(
           terminal = terminal,
           totalFiles = metadata.fileCount,
-          totalBytes = metadata.totalBytes
+          totalBytes = metadata.totalBytes,
+          initialFiles = initialFiles,
+          initialBytes = initialBytes
         )
-      indicator.apply { setTotals(metadata.fileCount, metadata.totalBytes) }
+      indicator.apply {
+        setTotals(
+          totalFiles = metadata.fileCount,
+          totalBytes = metadata.totalBytes,
+          initialFiles = initialFiles,
+          initialBytes = initialBytes
+        )
+      }
     } else {
       null
     }
 
     try {
-      service.scanAndRecord(directory, algorithm = algorithm) { file ->
+      service.scanAndRecord(
+        rootPath = targetDirectory,
+        algorithm = algorithm,
+        resumeSnapshotId = continueId
+      ) { file ->
         if (!quiet) {
           echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
         } else {

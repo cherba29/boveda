@@ -172,4 +172,36 @@ class WorkStealingDirectoryScannerTest {
       WorkStealingDirectoryScanner(fileChunkSize = 0)
     }
   }
+
+  @Test
+  fun `scan respects shouldSkip predicate and avoids hashing skipped files`() {
+    val tempDir = Files.createTempDirectory("ws-skip-test")
+    try {
+      tempDir.resolve("skip.txt").writeText("skip me")
+      tempDir.resolve("keep.txt").writeText("keep me")
+
+      val hashedFiles = mutableListOf<String>()
+      val spyHasher = object : FileHasher {
+        override fun computeHash(file: File, algorithm: String): String {
+          hashedFiles.add(file.name)
+          return "hash_${file.name}"
+        }
+
+        override fun computeHash(inputStream: InputStream, algorithm: String): String =
+          "hash_stream"
+      }
+
+      val scanner = WorkStealingDirectoryScanner(parallelism = 2, hasher = spyHasher)
+      val results = scanner.scan(
+        rootPath = tempDir,
+        shouldSkip = { it.path.fileName.toString() == "skip.txt" }
+      ).toList()
+
+      assertEquals(1, results.size)
+      assertEquals("keep.txt", results[0].relativePath)
+      assertEquals(listOf("keep.txt"), hashedFiles)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+    }
+  }
 }

@@ -64,7 +64,14 @@ class ParallelDirectoryScanner(
     }
   }
 
-  override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> {
+  override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
+    scan(rootPath, algorithm, shouldSkip = null)
+
+  override fun scan(
+    rootPath: Path,
+    algorithm: String,
+    shouldSkip: ((DiscoveredFile) -> Boolean)?
+  ): Sequence<ScannedFile> {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
@@ -109,14 +116,23 @@ class ParallelDirectoryScanner(
                 null
               }
 
-              workQueue.put(
-                WorkItem.FileItem(
-                  path = normalizedFilePath,
-                  relativePath = relativePath,
-                  size = size,
-                  lastModifiedTime = lastModified
-                )
+              val discovered = DiscoveredFile(
+                path = normalizedFilePath,
+                relativePath = relativePath,
+                size = size,
+                lastModifiedTime = lastModified
               )
+
+              if (shouldSkip == null || !shouldSkip(discovered)) {
+                workQueue.put(
+                  WorkItem.FileItem(
+                    path = normalizedFilePath,
+                    relativePath = relativePath,
+                    size = size,
+                    lastModifiedTime = lastModified
+                  )
+                )
+              }
             }
           }
 

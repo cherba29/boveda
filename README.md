@@ -7,6 +7,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 ## Features
 
 - **Decoupled CLI Commands (`scan` and `db`)**: Clean separation between directory scanning / database population (`scan`) and offline analytical database querying (`db`, `db print-duplicates`).
+- **Resume Incomplete Scans (`scan --continue <snapshot_id>`)**: If a scan is interrupted or terminated midway, resume exactly where it left off using the snapshot ID. The directory path is retrieved directly from the snapshot, and files already processed with matching path, name, timestamp, and size are skipped without recomputing cryptographic hashes.
 - **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs.
 - **Multi-Threaded Producer-Consumer Pipeline**: Decouples directory walking (Stage 1), cryptographic hashing across worker thread pools (Stage 2), and database persistence (Stage 3) via bounded queues for maximum multi-core CPU utilization.
 - **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
@@ -81,11 +82,12 @@ Commands:
 Scans a directory tree, computes file content hashes, and populates the target database with a new snapshot:
 
 ```text
-Usage: boveda scan [<options>] <directory> [<database>]
+Usage: boveda scan [<options>] [<directory>] [<database>]
 
   Scan directory and populate the target database with file fingerprints.
 
 Options:
+  -c, --continue=<int>    Resume an incomplete directory scan for the given snapshot ID.
   -d, --db=<path>         Target database file path.
   -a, --algorithm=<text>  Cryptographic hashing algorithm (e.g. MD5, SHA-256, SHA-512). Default is MD5.
   -q, --quiet             Suppress per-file progress output during directory scan.
@@ -100,7 +102,7 @@ Options:
   -h, --help              Show this message and exit
 
 Arguments:
-  <directory>  Directory path to scan.
+  <directory>  Directory path to scan (optional when --continue is provided).
   <database>   Target database file path.
 ```
 

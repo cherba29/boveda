@@ -158,6 +158,11 @@ interface ScanProgressIndicator : AutoCloseable {
   /** Configures or updates the pre-computed totals for files and bytes. */
   fun setTotals(totalFiles: Long?, totalBytes: Long?) {}
 
+  /** Configures or updates the pre-computed totals and initial counts for files and bytes. */
+  fun setTotals(totalFiles: Long?, totalBytes: Long?, initialFiles: Long, initialBytes: Long) {
+    setTotals(totalFiles, totalBytes)
+  }
+
   /** Called whenever a file has been discovered and processed. */
   fun onFileProcessed(file: ScannedFile)
 
@@ -177,16 +182,20 @@ interface ScanProgressIndicator : AutoCloseable {
  * @param terminal The Mordant [Terminal] instance.
  * @param totalFiles Pre-computed total number of regular files discovered beforehand.
  * @param totalBytes Pre-computed total byte size discovered beforehand.
+ * @param initialFiles Initial number of files already processed (e.g. from a resumed scan).
+ * @param initialBytes Initial byte size of files already processed (e.g. from a resumed scan).
  * @param timeProvider Clock provider returning nanoseconds, defaulting to [System.nanoTime].
  */
 class MordantScanProgressIndicator(
   private val terminal: Terminal,
   totalFiles: Long? = null,
   totalBytes: Long? = null,
+  initialFiles: Long = 0L,
+  initialBytes: Long = 0L,
   private val timeProvider: () -> Long = { System.nanoTime() }
 ) : ScanProgressIndicator {
-  private val filesCount = AtomicLong(0)
-  private val bytesCount = AtomicLong(0)
+  private val filesCount = AtomicLong(initialFiles)
+  private val bytesCount = AtomicLong(initialBytes)
   private val totalFilesRef = AtomicReference<Long?>(totalFiles)
   private val totalBytesRef = AtomicReference<Long?>(totalBytes)
   private val startNanos = timeProvider()
@@ -215,11 +224,16 @@ class MordantScanProgressIndicator(
       this.executor = exec
 
       val initialTotal = totalBytes?.takeIf { it > 0L } ?: totalFiles?.takeIf { it > 0L }
+      val initialCompleted = if (totalBytes != null && totalBytes > 0L) {
+        initialBytes
+      } else {
+        initialFiles
+      }
       val anim = layout.animateOnThread(
         terminal = terminal,
         context = currentState(),
         total = initialTotal,
-        completed = 0L,
+        completed = initialCompleted,
         maker = MultiProgressBarWidgetMaker
       )
       this.animator = anim
@@ -239,7 +253,17 @@ class MordantScanProgressIndicator(
     )
   }
 
-  override fun setTotals(totalFiles: Long?, totalBytes: Long?) {
+  override fun setTotals(totalFiles: Long?, totalBytes: Long?) =
+    setTotals(totalFiles, totalBytes, initialFiles = 0L, initialBytes = 0L)
+
+  override fun setTotals(
+    totalFiles: Long?,
+    totalBytes: Long?,
+    initialFiles: Long,
+    initialBytes: Long
+  ) {
+    if (initialFiles > 0L) filesCount.set(initialFiles)
+    if (initialBytes > 0L) bytesCount.set(initialBytes)
     totalFilesRef.set(totalFiles)
     totalBytesRef.set(totalBytes)
     if (isInteractive) {

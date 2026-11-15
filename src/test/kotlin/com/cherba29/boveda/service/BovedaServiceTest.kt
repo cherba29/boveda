@@ -6,6 +6,7 @@ import com.cherba29.boveda.db.RepoFileInstance
 import com.cherba29.boveda.db.RepoFileInstances
 import com.cherba29.boveda.db.RepoSnapshot
 import com.cherba29.boveda.scanner.DirectoryScanner
+import com.cherba29.boveda.scanner.DiscoveredFile
 import com.cherba29.boveda.scanner.ScannedFile
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
@@ -522,5 +523,122 @@ class BovedaServiceTest {
     assertTrue(tableOutput.contains("/vault"))
     assertTrue(tableOutput.contains("Completed"))
     assertTrue(tableOutput.contains("1.00 MB"))
+  }
+
+  @Test
+  fun `getSnapshotFileEntries and isUnchanged identify unchanged files accurately`() {
+    val (service, _) = createService()
+    val snap = service.createSnapshot(Paths.get("/vault"))
+    val file1 = ScannedFile(
+      path = Paths.get("/vault/a.txt"),
+      relativePath = "a.txt",
+      size = 100L,
+      hash = "hash1",
+      lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(1_000_000L)
+    )
+    service.recordFiles(snap, listOf(file1))
+
+    val entries = service.getSnapshotFileEntries(snap.id.value)
+    assertEquals(1, entries.size)
+    val entry = entries["/vault/a.txt"]!!
+    assertEquals(100L, entry.size)
+    assertEquals(1_000_000L, entry.timestamp)
+    assertEquals("hash1", entry.hash)
+
+    // Exact match
+    val matching = DiscoveredFile(
+      path = Paths.get("/vault/a.txt"),
+      relativePath = "a.txt",
+      size = 100L,
+      lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(1_000_000L)
+    )
+    assertTrue(service.isUnchanged(matching, entry))
+
+    // Size changed
+    val sizeChanged = matching.copy(size = 105L)
+    assertFalse(service.isUnchanged(sizeChanged, entry))
+
+    // Timestamp changed
+    val timeChanged = matching.copy(
+      lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(2_000_000L)
+    )
+    assertFalse(service.isUnchanged(timeChanged, entry))
+
+    // Path changed
+    val pathChanged = matching.copy(path = Paths.get("/vault/other.txt"))
+    assertFalse(service.isUnchanged(pathChanged, entry))
+  }
+
+  @Test
+  fun `scanAndRecord with resumeSnapshotId skips unchanged files and records remaining files`() {
+    val db = DatabaseFactory.connectInMemory(
+      "resume_test_${UUID.randomUUID().toString().replace("-", "")}"
+    )
+    val rootPath = Paths.get("/vault")
+
+    val initService = BovedaService(database = db)
+    val snap = initService.createSnapshot(rootPath)
+    val file1 = ScannedFile(
+      path = Paths.get("/vault/file1.txt"),
+      relativePath = "file1.txt",
+      size = 100L,
+      hash = "hash1",
+      lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(5000L)
+    )
+    initService.recordFiles(snap, listOf(file1))
+
+    val file2 = ScannedFile(
+      path = Paths.get("/vault/file2.txt"),
+      relativePath = "file2.txt",
+      size = 200L,
+      hash = "hash2",
+      lastModifiedTime = java.nio.file.attribute.FileTime.fromMillis(6000L)
+    )
+
+    val mockScanner = object : DirectoryScanner {
+      override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
+        scan(rootPath, algorithm, shouldSkip = null)
+
+      override fun scan(
+        rootPath: Path,
+        algorithm: String,
+        shouldSkip: ((DiscoveredFile) -> Boolean)?
+      ): Sequence<ScannedFile> = sequence {
+        val disc1 = DiscoveredFile(
+          file1.path,
+          file1.relativePath,
+          file1.size,
+          file1.lastModifiedTime
+        )
+        if (shouldSkip == null || !shouldSkip(disc1)) {
+          yield(file1)
+        }
+        val disc2 = DiscoveredFile(
+          file2.path,
+          file2.relativePath,
+          file2.size,
+          file2.lastModifiedTime
+        )
+        if (shouldSkip == null || !shouldSkip(disc2)) {
+          yield(file2)
+        }
+      }
+    }
+
+    val resumeService = BovedaService(database = db, scanner = mockScanner)
+    val scannedList = mutableListOf<ScannedFile>()
+    val completedSnap = resumeService.scanAndRecord(
+      rootPath = rootPath,
+      resumeSnapshotId = snap.id.value
+    ) { scannedList.add(it) }
+
+    assertTrue(completedSnap.isCompleted)
+    assertEquals(1, scannedList.size)
+    assertEquals("file2.txt", scannedList[0].relativePath)
+
+    val entries = resumeService.getSnapshotFileEntries(snap.id.value)
+    assertEquals(2, entries.size)
+    assertTrue(entries.keys.any { it.endsWith("file1.txt") })
+    assertTrue(entries.keys.any { it.endsWith("file2.txt") })
   }
 }
