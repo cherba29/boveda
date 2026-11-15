@@ -31,3 +31,20 @@ data class FileRecordWithDuplicateRank(
     val hash: String,
     val duplicateRank: Long
 )
+
+/**
+ * Summary record representing an existing repository snapshot.
+ *
+ * @property id The unique snapshot identifier.
+ * @property rootPath The root directory path scanned in this snapshot.
+ * @property isCompleted Whether the snapshot scan successfully completed.
+ * @property fileCount Total number of file instances recorded under this snapshot.
+ * @property totalBytes Total storage size in bytes across all files recorded under this snapshot.
+ */
+data class SnapshotSummary(
+    val id: Int,
+    val rootPath: String,
+    val isCompleted: Boolean,
+    val fileCount: Long,
+    val totalBytes: Long
+)

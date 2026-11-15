@@ -72,6 +72,8 @@ class IntegrationTest {
                 main(arrayOf("scan", tempDir.toString(), dbFile.toString()))
                 main(arrayOf("db", dbFile.toString()))
                 main(arrayOf("db", "print-duplicates", dbFile.toString()))
+                main(arrayOf("db", "snapshots", "list", dbFile.toString()))
+                main(arrayOf("db", "snapshots", "delete", "1", dbFile.toString()))
             } finally {
                 System.setOut(originalOut)
             }
@@ -81,6 +83,7 @@ class IntegrationTest {
             assertTrue(output.contains("sample.txt"))
             assertTrue(output.contains("### ==== Selecting from DB ==== ###"))
             assertTrue(output.contains("### ==== Duplicate Files in DB ==== ###"))
+            assertTrue(output.contains("Snapshot 1 deleted successfully."))
         } finally {
             tempDir.toFile().deleteRecursively()
         }

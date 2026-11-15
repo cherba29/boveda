@@ -14,6 +14,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
 - **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across snapshots.
+- **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status. Delete unneeded snapshots by ID with automatic cascade deletion of file instances and orphaned file metadata.
 - **Duplication & Storage Statistics with Mordant Table**: With `boveda db print-duplicates`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 largest duplicate groups, and a Mordant-rendered 10% percentile deciles table featuring total file size (`Size`) per decile and summed totals in the footer row.
 - **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
 - **Rich CLI with Clikt**: Structured command-line interface with subcommands, path validation, custom hashing algorithm selection, quiet mode, persistent database options, and snapshot targeting.
@@ -124,6 +125,7 @@ Arguments:
 
 Commands:
   print-duplicates  Query the provided database for the latest snapshot and print duplicate files and statistics.
+  snapshots         Manage database snapshots (list, delete).
 ```
 
 ### 3. `db print-duplicates` Subcommand
@@ -145,6 +147,47 @@ Options:
 
 Arguments:
   <database>  Path to persistent H2 database file.
+```
+
+### 4. `db snapshots list` Subcommand
+
+Lists all recorded snapshots in the database in a formatted table showing snapshot ID, root path, file count, total storage size, and completion status:
+
+```text
+Usage: boveda db snapshots list [<options>] [<database>]
+# or: boveda db [<database>] snapshots list [<options>]
+
+  List all snapshots stored in the database.
+
+Options:
+  -d, --db=<path>  Path to persistent H2 database file.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                   Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help       Show this message and exit
+
+Arguments:
+  <database>  Path to persistent H2 database file.
+```
+
+### 5. `db snapshots delete` Subcommand
+
+Deletes a chosen snapshot by its snapshot ID from the database, cascading to remove its file instances and any orphaned files no longer referenced by other snapshots:
+
+```text
+Usage: boveda db snapshots delete [<options>] <snapshot_id> [<database>]
+# or: boveda db [<database>] snapshots delete <snapshot_id> [<options>]
+
+  Delete a snapshot from the database by its snapshot ID.
+
+Options:
+  -d, --db=<path>  Path to persistent H2 database file.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                   Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help       Show this message and exit
+
+Arguments:
+  <snapshot_id>  ID of the snapshot to delete.
+  <database>     Path to persistent H2 database file.
 ```
 
 ---
@@ -292,6 +335,37 @@ Query a historical snapshot rather than the default latest snapshot:
 Direct SQL query execution logs to stderr by setting `--log-level=DEBUG`:
 ```bash
 ./gradlew run --args="-l DEBUG scan /path/to/my/documents /tmp/vault.db"
+```
+
+### 10. List Existing Database Snapshots
+List all recorded snapshots with root directory path, total file counts, storage size, and completion status:
+```bash
+./gradlew run --args="db snapshots list /tmp/vault.db"
+# or equivalently:
+./gradlew run --args="db /tmp/vault.db snapshots list"
+```
+
+Example output:
+```text
+┌────┬──────────────┬─────────┬────────────┬───────────┐
+│ ID │ Root Path    │   Files │ Total Size │  Status   │
+╞════╪══════════════╪═════════╪════════════╪═══════════╡
+│  1 │ /data/vault1 │   4,142 │  130.56 MB │ Completed │
+│  2 │ /data/vault2 │     512 │   15.20 MB │ Completed │
+└────┴──────────────┴─────────┴────────────┴───────────┘
+```
+
+### 11. Delete a Snapshot by Snapshot ID
+Delete a specific snapshot by its ID, cleaning up its file instances and any orphaned files:
+```bash
+./gradlew run --args="db snapshots delete 1 /tmp/vault.db"
+# or equivalently:
+./gradlew run --args="db /tmp/vault.db snapshots delete 1"
+```
+
+Example output:
+```text
+Snapshot 1 deleted successfully.
 ```
 
 ---

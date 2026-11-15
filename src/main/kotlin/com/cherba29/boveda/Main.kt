@@ -13,6 +13,7 @@ import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import com.cherba29.boveda.hash.computeFileHash
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.SnapshotSummary
 import com.cherba29.boveda.progress.MordantScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressState
@@ -64,6 +65,7 @@ typealias ParallelDirectoryScanner = com.cherba29.boveda.scanner.ParallelDirecto
 typealias WorkStealingDirectoryScanner = com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 typealias FileTreeDirectoryScanner = com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 typealias DiscoveredFile = com.cherba29.boveda.scanner.DiscoveredFile
+typealias SnapshotSummary = com.cherba29.boveda.model.SnapshotSummary
 
 internal fun validateDatabaseFileExists(path: Path) {
     val pathStr = path.toString()
@@ -71,6 +73,39 @@ internal fun validateDatabaseFileExists(path: Path) {
     val fileExists = Files.exists(Path.of(base)) || Files.exists(Path.of("$base.mv.db"))
     if (!fileExists) {
         throw UsageError("Database file does not exist: $path")
+    }
+}
+
+internal fun resolveDatabasePath(context: Context, localPath: Path? = null, localOption: Path? = null): Path? {
+    if (localPath != null) return localPath
+    if (localOption != null) return localOption
+    var current: Context? = context.parent
+    while (current != null) {
+        val cmd = current.command
+        if (cmd is SnapshotsCommand) {
+            val p = cmd.dbPath ?: cmd.dbOption
+            if (p != null) return p
+        }
+        if (cmd is DbCommand) {
+            val p = cmd.dbPath ?: cmd.dbOption
+            if (p != null) return p
+        }
+        current = current.parent
+    }
+    return null
+}
+
+internal fun connectDatabase(
+    resolvedDbPath: Path?,
+    serviceFactory: ((Database) -> BovedaService)?
+): Database {
+    return when {
+        resolvedDbPath != null -> {
+            if (serviceFactory == null) validateDatabaseFileExists(resolvedDbPath)
+            DatabaseFactory.connectFile(resolvedDbPath.toString())
+        }
+        serviceFactory != null -> DatabaseFactory.connectInMemory("test")
+        else -> throw UsageError("Database must be specified as an argument or via --db")
     }
 }
 
@@ -112,11 +147,9 @@ class BovedaCommand(
     ).default(Level.WARN)
 
     init {
-        val dbCommand = DbCommand(serviceFactory)
-        dbCommand.subcommands(PrintDuplicatesCommand(serviceFactory))
         subcommands(
             ScanCommand(serviceFactory, progressIndicatorFactory),
-            dbCommand
+            DbCommand(serviceFactory)
         )
     }
 
@@ -305,19 +338,19 @@ class DbCommand(
         ignoreCase = true
     )
 
+    init {
+        subcommands(
+            PrintDuplicatesCommand(serviceFactory),
+            SnapshotsCommand(serviceFactory)
+        )
+    }
+
     override fun run() {
         logLevel?.let { LoggingConfig.setRootLevel(it) }
 
         if (currentContext.invokedSubcommand == null) {
-            val resolvedDbPath = dbPath ?: dbOption
-            val repoDb = when {
-                resolvedDbPath != null -> {
-                    if (serviceFactory == null) validateDatabaseFileExists(resolvedDbPath)
-                    DatabaseFactory.connectFile(resolvedDbPath.toString())
-                }
-                serviceFactory != null -> DatabaseFactory.connectInMemory("test")
-                else -> throw UsageError("Database must be specified as an argument or via --db")
-            }
+            val resolvedDbPath = resolveDatabasePath(currentContext, dbPath, dbOption)
+            val repoDb = connectDatabase(resolvedDbPath, serviceFactory)
 
             val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
             val snapshot = resolveSnapshot(service, snapshotIdOption)
@@ -375,17 +408,8 @@ class PrintDuplicatesCommand(
         val startTime = System.nanoTime()
         logLevel?.let { LoggingConfig.setRootLevel(it) }
 
-        val parentDb = (currentContext.parent?.command as? DbCommand)?.let { it.dbPath ?: it.dbOption }
-        val resolvedDbPath = dbPath ?: dbOption ?: parentDb
-
-        val repoDb = when {
-            resolvedDbPath != null -> {
-                if (serviceFactory == null) validateDatabaseFileExists(resolvedDbPath)
-                DatabaseFactory.connectFile(resolvedDbPath.toString())
-            }
-            serviceFactory != null -> DatabaseFactory.connectInMemory("test")
-            else -> throw UsageError("Database must be specified as an argument or via --db")
-        }
+        val resolvedDbPath = resolveDatabasePath(currentContext, dbPath, dbOption)
+        val repoDb = connectDatabase(resolvedDbPath, serviceFactory)
 
         val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
         val snapshot = resolveSnapshot(service, snapshotIdOption)
@@ -408,6 +432,160 @@ class PrintDuplicatesCommand(
         val duration = elapsedNanos.nanoseconds
         val stats = service.computeDuplicateStatistics(snapshot.id.value, duration)
         service.printDuplicateStatistics(stats) { echo(it) }
+    }
+}
+
+/**
+ * Clikt subcommand for managing database snapshots (list, delete).
+ */
+class SnapshotsCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null
+) : CliktCommand(
+    name = "snapshots"
+) {
+    override fun help(context: Context): String =
+        "Manage database snapshots (list, delete)."
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
+    init {
+        subcommands(
+            ListSnapshotsCommand(serviceFactory),
+            DeleteSnapshotCommand(serviceFactory)
+        )
+    }
+
+    override fun run() {
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
+    }
+}
+
+/**
+ * Clikt subcommand for listing all snapshots stored in the database.
+ */
+class ListSnapshotsCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null
+) : CliktCommand(
+    name = "list"
+) {
+    override fun help(context: Context): String =
+        "List all snapshots stored in the database."
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
+    override fun run() {
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
+
+        val resolvedDbPath = resolveDatabasePath(currentContext, dbPath, dbOption)
+        val repoDb = connectDatabase(resolvedDbPath, serviceFactory)
+
+        val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
+        val snapshots = service.listSnapshots()
+        if (snapshots.isEmpty()) {
+            echo("No snapshots found in database.")
+        } else {
+            echo(service.formatSnapshotsTable(snapshots, terminal))
+        }
+    }
+}
+
+/**
+ * Clikt subcommand for deleting a snapshot from the database by its snapshot ID.
+ */
+class DeleteSnapshotCommand(
+    private val serviceFactory: ((Database) -> BovedaService)? = null
+) : CliktCommand(
+    name = "delete"
+) {
+    override fun help(context: Context): String =
+        "Delete a snapshot from the database by its snapshot ID."
+
+    val snapshotId: Int by argument(
+        name = "SNAPSHOT_ID",
+        help = "ID of the snapshot to delete."
+    ).int()
+
+    val dbPath: Path? by argument(
+        name = "DATABASE",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false).optional()
+
+    val dbOption: Path? by option(
+        "-d", "--db",
+        help = "Path to persistent H2 database file."
+    ).path(canBeFile = true, canBeDir = false)
+
+    val logLevel: Level? by option(
+        "-l", "--log-level",
+        help = "Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE)."
+    ).choice(
+        "OFF" to Level.OFF,
+        "ERROR" to Level.ERROR,
+        "WARN" to Level.WARN,
+        "WARNING" to Level.WARN,
+        "INFO" to Level.INFO,
+        "DEBUG" to Level.DEBUG,
+        "TRACE" to Level.TRACE,
+        ignoreCase = true
+    )
+
+    override fun run() {
+        logLevel?.let { LoggingConfig.setRootLevel(it) }
+
+        val resolvedDbPath = resolveDatabasePath(currentContext, dbPath, dbOption)
+        val repoDb = connectDatabase(resolvedDbPath, serviceFactory)
+
+        val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
+        val deleted = service.deleteSnapshot(snapshotId)
+        if (!deleted) {
+            throw UsageError("Snapshot with ID $snapshotId does not exist.")
+        } else {
+            echo("Snapshot $snapshotId deleted successfully.")
+        }
     }
 }
 

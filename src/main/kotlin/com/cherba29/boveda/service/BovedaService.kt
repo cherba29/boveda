@@ -14,6 +14,7 @@ import com.cherba29.boveda.model.DuplicateStatistics
 import com.cherba29.boveda.model.FileRecord
 import com.cherba29.boveda.model.FileRecordWithDuplicateRank
 import com.cherba29.boveda.model.PercentileBucket
+import com.cherba29.boveda.model.SnapshotSummary
 import com.cherba29.boveda.model.formatBytes
 import com.cherba29.boveda.model.formatBytesShort
 import com.cherba29.boveda.model.formatDuration
@@ -33,12 +34,16 @@ import kotlin.time.Duration
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.alias
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.count
 import org.jetbrains.exposed.v1.core.dao.id.EntityID
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.core.notInSubQuery
 import org.jetbrains.exposed.v1.core.rowNumber
+import org.jetbrains.exposed.v1.core.sum
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
@@ -232,6 +237,48 @@ class BovedaService(
      */
     fun findSnapshot(snapshotId: Int): RepoSnapshot? = transaction(database) {
         RepoSnapshot.findById(snapshotId)
+    }
+
+    /**
+     * Lists all snapshots with file count and total storage size.
+     */
+    fun listSnapshots(): List<SnapshotSummary> = transaction(database) {
+        val countCol = RepoFileInstances.id.count().alias("file_count")
+        val sizeCol = RepoFiles.size.sum().alias("total_bytes")
+
+        val join = RepoSnapshots leftJoin RepoFileInstances leftJoin RepoFiles
+
+        join.select(
+            RepoSnapshots.id,
+            RepoSnapshots.rootPath,
+            RepoSnapshots.isCompleted,
+            countCol,
+            sizeCol
+        )
+        .groupBy(RepoSnapshots.id, RepoSnapshots.rootPath, RepoSnapshots.isCompleted)
+        .orderBy(RepoSnapshots.id to SortOrder.ASC)
+        .map { row ->
+            SnapshotSummary(
+                id = row[RepoSnapshots.id].value,
+                rootPath = row[RepoSnapshots.rootPath],
+                isCompleted = row[RepoSnapshots.isCompleted],
+                fileCount = row[countCol],
+                totalBytes = row[sizeCol] ?: 0L
+            )
+        }
+    }
+
+    /**
+     * Deletes a snapshot by its [snapshotId], removing its file instances and any orphaned files.
+     *
+     * @return true if the snapshot was found and deleted, false otherwise.
+     */
+    fun deleteSnapshot(snapshotId: Int): Boolean = transaction(database) {
+        val snapshot = RepoSnapshot.findById(snapshotId) ?: return@transaction false
+        RepoFileInstances.deleteWhere { RepoFileInstances.snapshot eq snapshot.id }
+        RepoFiles.deleteWhere { RepoFiles.id notInSubQuery (RepoFileInstances.select(RepoFileInstances.file)) }
+        snapshot.delete()
+        true
     }
 
     /**
@@ -526,6 +573,49 @@ class BovedaService(
             column(4) { align = TextAlign.RIGHT }
             column(5) { align = TextAlign.RIGHT }
             column(6) { align = TextAlign.RIGHT }
+        }
+        val naturalWidth = mordantTable.measure(terminal, 1000).max
+        val renderTerminal = if (terminal.size.width < naturalWidth) {
+            Terminal(
+                ansiLevel = terminal.terminalInfo.ansiLevel,
+                theme = terminal.theme,
+                width = naturalWidth,
+                hyperlinks = terminal.terminalInfo.ansiHyperLinks,
+                tabWidth = terminal.tabWidth
+            )
+        } else {
+            terminal
+        }
+        return renderTerminal.render(mordantTable)
+    }
+
+    /**
+     * Formats a list of [SnapshotSummary] items into an aligned table rendered by Mordant.
+     */
+    fun formatSnapshotsTable(snapshots: List<SnapshotSummary>, terminal: Terminal = Terminal()): String {
+        val mordantTable = table {
+            borderType = BorderType.SQUARE_DOUBLE_SECTION_SEPARATOR
+            header {
+                style(bold = true)
+                row("ID", "Root Path", "Files", "Total Size", "Status")
+            }
+            body {
+                for (snapshot in snapshots) {
+                    val statusStr = if (snapshot.isCompleted) "Completed" else "In Progress"
+                    row(
+                        snapshot.id.toString(),
+                        snapshot.rootPath,
+                        String.format(Locale.US, "%,d", snapshot.fileCount),
+                        formatBytesShort(snapshot.totalBytes),
+                        statusStr
+                    )
+                }
+            }
+            column(0) { align = TextAlign.RIGHT }
+            column(1) { align = TextAlign.LEFT }
+            column(2) { align = TextAlign.RIGHT }
+            column(3) { align = TextAlign.RIGHT }
+            column(4) { align = TextAlign.CENTER }
         }
         val naturalWidth = mordantTable.measure(terminal, 1000).max
         val renderTerminal = if (terminal.size.width < naturalWidth) {

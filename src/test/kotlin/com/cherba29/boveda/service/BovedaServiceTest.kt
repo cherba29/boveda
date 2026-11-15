@@ -394,4 +394,105 @@ class BovedaServiceTest {
         // f3 is miss (new)
         assertEquals(3, stats.totalRequests)
     }
+
+    @Test
+    fun `listSnapshots returns empty list when no snapshots exist`() {
+        val (service, _) = createService()
+        val snapshots = service.listSnapshots()
+        assertTrue(snapshots.isEmpty())
+    }
+
+    @Test
+    fun `listSnapshots returns snapshots with correct file counts, total bytes, and completion status`() {
+        val (service, db) = createService()
+        val snap1 = service.createSnapshot(Paths.get("/data1"))
+        val snap2 = service.createSnapshot(Paths.get("/data2"))
+
+        val file1 = ScannedFile(Paths.get("/data1/f1.txt"), "f1.txt", 100L, "hash1")
+        val file2 = ScannedFile(Paths.get("/data1/f2.txt"), "f2.txt", 200L, "hash2")
+        service.recordFiles(snap1, listOf(file1, file2))
+        service.completeSnapshot(snap1)
+
+        val file3 = ScannedFile(Paths.get("/data2/f3.txt"), "f3.txt", 500L, "hash3")
+        service.recordFiles(snap2, listOf(file3))
+        // snap2 is not marked completed
+
+        val list = service.listSnapshots()
+        assertEquals(2, list.size)
+
+        val summary1 = list.first { it.id == snap1.id.value }
+        assertEquals("/data1", summary1.rootPath)
+        assertTrue(summary1.isCompleted)
+        assertEquals(2L, summary1.fileCount)
+        assertEquals(300L, summary1.totalBytes)
+
+        val summary2 = list.first { it.id == snap2.id.value }
+        assertEquals("/data2", summary2.rootPath)
+        assertFalse(summary2.isCompleted)
+        assertEquals(1L, summary2.fileCount)
+        assertEquals(500L, summary2.totalBytes)
+    }
+
+    @Test
+    fun `deleteSnapshot removes file instances, orphaned files, and snapshot record`() {
+        val (service, db) = createService()
+        val snap1 = service.createSnapshot(Paths.get("/snap1"))
+        val snap2 = service.createSnapshot(Paths.get("/snap2"))
+
+        // snap1 has unique f1, and shared f2 (same content/hash)
+        // snap2 has shared f2, and unique f3
+        val sharedFile1 = ScannedFile(Paths.get("/snap1/shared.txt"), "shared.txt", 150L, "shared-hash")
+        val uniqueFile1 = ScannedFile(Paths.get("/snap1/unique1.txt"), "unique1.txt", 250L, "unique1-hash")
+        service.recordFiles(snap1, listOf(sharedFile1, uniqueFile1))
+        service.completeSnapshot(snap1)
+
+        val sharedFile2 = ScannedFile(Paths.get("/snap2/shared_copy.txt"), "shared_copy.txt", 150L, "shared-hash")
+        val uniqueFile2 = ScannedFile(Paths.get("/snap2/unique2.txt"), "unique2.txt", 350L, "unique2-hash")
+        service.recordFiles(snap2, listOf(sharedFile2, uniqueFile2))
+        service.completeSnapshot(snap2)
+
+        transaction(db) {
+            assertEquals(3, RepoFile.all().count()) // shared, unique1, unique2
+            assertEquals(4, RepoFileInstance.all().count())
+            assertEquals(2, RepoSnapshot.all().count())
+        }
+
+        // Delete snap1
+        val result = service.deleteSnapshot(snap1.id.value)
+        assertTrue(result)
+
+        transaction(db) {
+            // unique1 should be deleted because it is no longer referenced
+            // shared should remain because snap2 references it
+            // unique2 should remain
+            assertEquals(2, RepoFile.all().count())
+            assertEquals(2, RepoFileInstance.all().count())
+            assertEquals(1, RepoSnapshot.all().count())
+            assertEquals(snap2.id.value, RepoSnapshot.all().first().id.value)
+        }
+
+        // Deleting non-existent snapshot returns false
+        assertFalse(service.deleteSnapshot(9999))
+    }
+
+    @Test
+    fun `formatSnapshotsTable renders formatted table with correct headers and rows`() {
+        val (service, _) = createService()
+        val snap = service.createSnapshot(Paths.get("/vault"))
+        val file = ScannedFile(Paths.get("/vault/document.pdf"), "document.pdf", 1024L * 1024L, "doc-hash")
+        service.recordFiles(snap, listOf(file))
+        service.completeSnapshot(snap)
+
+        val summaries = service.listSnapshots()
+        val tableOutput = service.formatSnapshotsTable(summaries)
+
+        assertTrue(tableOutput.contains("ID"))
+        assertTrue(tableOutput.contains("Root Path"))
+        assertTrue(tableOutput.contains("Files"))
+        assertTrue(tableOutput.contains("Total Size"))
+        assertTrue(tableOutput.contains("Status"))
+        assertTrue(tableOutput.contains("/vault"))
+        assertTrue(tableOutput.contains("Completed"))
+        assertTrue(tableOutput.contains("1.00 MB"))
+    }
 }

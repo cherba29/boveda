@@ -54,6 +54,7 @@ class BovedaCommandTest {
         assertTrue(dbResult.output.contains("--db"))
         assertTrue(dbResult.output.contains("--snapshot"))
         assertTrue(dbResult.output.contains("print-duplicates"))
+        assertTrue(dbResult.output.contains("snapshots"))
 
         // Test db print-duplicates help
         val printDupResult = command.test(listOf("db", "print-duplicates", "--help"))
@@ -61,6 +62,25 @@ class BovedaCommandTest {
         assertTrue(printDupResult.output.contains("<database>"))
         assertTrue(printDupResult.output.contains("--db"))
         assertTrue(printDupResult.output.contains("--snapshot"))
+
+        // Test db snapshots help
+        val snapshotsResult = command.test(listOf("db", "snapshots", "--help"))
+        assertEquals(0, snapshotsResult.statusCode)
+        assertTrue(snapshotsResult.output.contains("list"))
+        assertTrue(snapshotsResult.output.contains("delete"))
+
+        // Test db snapshots list help
+        val listResult = command.test(listOf("db", "snapshots", "list", "--help"))
+        assertEquals(0, listResult.statusCode)
+        assertTrue(listResult.output.contains("<database>"))
+        assertTrue(listResult.output.contains("--db"))
+
+        // Test db snapshots delete help
+        val deleteResult = command.test(listOf("db", "snapshots", "delete", "--help"))
+        assertEquals(0, deleteResult.statusCode)
+        assertTrue(deleteResult.output.contains("<snapshot_id>"))
+        assertTrue(deleteResult.output.contains("<database>"))
+        assertTrue(deleteResult.output.contains("--db"))
     }
 
     @Test
@@ -445,5 +465,152 @@ class BovedaCommandTest {
 
         assertNotEquals(0, result.statusCode)
         assertTrue(result.output.contains("invalid choice: INVALID_LEVEL"))
+    }
+
+    @Test
+    fun `db snapshots list displays empty message when no snapshots exist`() {
+        val tempDir = Files.createTempDirectory("clikt-empty-snapshots-test")
+        try {
+            val emptyDb = tempDir.resolve("empty_db")
+            val db = com.cherba29.boveda.db.DatabaseFactory.connectFile(emptyDb.toString())
+            // Initialize schema without snapshots
+            com.cherba29.boveda.db.DatabaseFactory.initSchema(db)
+
+            val command = BovedaCommand()
+            val result = command.test(listOf("db", "snapshots", "list", emptyDb.toString()))
+
+            assertEquals(0, result.statusCode)
+            assertTrue(result.output.contains("No snapshots found in database."))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots list displays formatted table for populated database`() {
+        val tempDir = Files.createTempDirectory("clikt-list-snapshots-test")
+        try {
+            tempDir.resolve("file1.txt").writeText("content 1")
+            tempDir.resolve("file2.txt").writeText("content 2")
+            val dbFile = tempDir.resolve("snapshots_db")
+
+            val command = BovedaCommand()
+            // 1. Scan directory to create snapshot
+            val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
+            assertEquals(0, scanResult.statusCode)
+
+            // 2. List snapshots
+            val listResult = command.test(listOf("db", "snapshots", "list", dbFile.toString()))
+            assertEquals(0, listResult.statusCode)
+            assertTrue(listResult.output.contains("ID"))
+            assertTrue(listResult.output.contains("Root Path"))
+            assertTrue(listResult.output.contains("Files"))
+            assertTrue(listResult.output.contains("Total Size"))
+            assertTrue(listResult.output.contains("Status"))
+            assertTrue(listResult.output.contains("Completed"))
+            assertTrue(listResult.output.contains(tempDir.toString()))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots list inherits database path from db parent command`() {
+        val tempDir = Files.createTempDirectory("clikt-parent-list-snapshots-test")
+        try {
+            tempDir.resolve("file.txt").writeText("content")
+            val dbFile = tempDir.resolve("parent_list_db")
+
+            val command = BovedaCommand()
+            val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
+            assertEquals(0, scanResult.statusCode)
+
+            // Database specified on db command
+            val listResult = command.test(listOf("db", dbFile.toString(), "snapshots", "list"))
+            assertEquals(0, listResult.statusCode)
+            assertTrue(listResult.output.contains("Completed"))
+            assertTrue(listResult.output.contains(tempDir.toString()))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots delete removes specified snapshot and outputs success`() {
+        val tempDir = Files.createTempDirectory("clikt-delete-snapshots-test")
+        try {
+            tempDir.resolve("file1.txt").writeText("content")
+            val dbFile = tempDir.resolve("delete_db")
+
+            val command = BovedaCommand()
+            val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
+            assertEquals(0, scanResult.statusCode)
+
+            // List to check snapshot ID 1
+            val listResultBefore = command.test(listOf("db", "snapshots", "list", dbFile.toString()))
+            assertEquals(0, listResultBefore.statusCode)
+            assertTrue(listResultBefore.output.contains("Completed"))
+
+            // Delete snapshot 1
+            val deleteResult = command.test(listOf("db", "snapshots", "delete", "1", dbFile.toString()))
+            assertEquals(0, deleteResult.statusCode)
+            assertTrue(deleteResult.output.contains("Snapshot 1 deleted successfully."))
+
+            // Verify list is now empty
+            val listResultAfter = command.test(listOf("db", "snapshots", "list", dbFile.toString()))
+            assertEquals(0, listResultAfter.statusCode)
+            assertTrue(listResultAfter.output.contains("No snapshots found in database."))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots delete inherits database path from db parent command`() {
+        val tempDir = Files.createTempDirectory("clikt-parent-delete-snapshots-test")
+        try {
+            tempDir.resolve("file.txt").writeText("content")
+            val dbFile = tempDir.resolve("parent_delete_db")
+
+            val command = BovedaCommand()
+            val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
+            assertEquals(0, scanResult.statusCode)
+
+            // Database specified on db command
+            val deleteResult = command.test(listOf("db", dbFile.toString(), "snapshots", "delete", "1"))
+            assertEquals(0, deleteResult.statusCode)
+            assertTrue(deleteResult.output.contains("Snapshot 1 deleted successfully."))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots delete fails when snapshot does not exist`() {
+        val tempDir = Files.createTempDirectory("clikt-delete-not-found-test")
+        try {
+            tempDir.resolve("file.txt").writeText("content")
+            val dbFile = tempDir.resolve("not_found_db")
+
+            val command = BovedaCommand()
+            val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
+            assertEquals(0, scanResult.statusCode)
+
+            // Delete non-existent snapshot ID 999
+            val deleteResult = command.test(listOf("db", "snapshots", "delete", "999", dbFile.toString()))
+            assertNotEquals(0, deleteResult.statusCode)
+            assertTrue(deleteResult.output.contains("Snapshot with ID 999 does not exist."))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `db snapshots delete fails when database does not exist`() {
+        val command = BovedaCommand()
+        val result = command.test(listOf("db", "snapshots", "delete", "1", "/path/to/definitely/nonexistent.db"))
+
+        assertNotEquals(0, result.statusCode)
+        assertTrue(result.output.contains("Database file does not exist"))
     }
 }
