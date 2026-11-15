@@ -7,6 +7,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 ## Features
 
 - **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
+- **Multi-Threaded Producer-Consumer Pipeline**: Decouples directory walking (Stage 1), cryptographic hashing across worker thread pools (Stage 2), and database persistence (Stage 3) via bounded queues for maximum multi-core CPU utilization.
 - **Streaming Cryptographic Hashing**: Chunk-based hashing (MD5, SHA-256, SHA-512, etc.) that handles large files efficiently without loading them entirely into memory.
 - **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
@@ -75,6 +76,8 @@ Options:
                           contents.
   -b, --batch-size=<int>  Number of files to batch per database transaction
                           during scanning. Default is 1000.
+  -t, --threads=<int>     Number of worker threads for parallel file hashing
+                          (defaults to available CPU cores).
   --no-cache-warmup       Disable pre-warming the in-memory deduplication cache
                           from the database on startup.
   -h, --help              Show this message and exit
@@ -195,11 +198,41 @@ On startup, Boveda automatically pre-warms its in-memory deduplication cache fro
 ./gradlew run --args="--no-cache-warmup --db /tmp/my_vault /path/to/my/documents"
 ```
 
-### 10. Combined Options
-Scan quietly using SHA-256 with debug logging to stderr, custom batch size of 2,000, only showing duplicates:
+### 10. Multi-Threaded Parallel Hashing
+Accelerate scanning across multi-core CPUs by allocating a dedicated worker thread pool (defaults to all available CPU cores):
 ```bash
-./gradlew run --args="-q -a SHA-256 -b 2000 -l DEBUG --duplicates-only /path/to/my/photos"
+./gradlew run --args="--threads 8 /path/to/my/documents"
 ```
+
+### 11. Combined Options
+Scan quietly using SHA-256 with 8 worker threads, debug logging to stderr, custom batch size of 2,000, only showing duplicates:
+```bash
+./gradlew run --args="-q -a SHA-256 -t 8 -b 2000 -l DEBUG --duplicates-only /path/to/my/photos"
+```
+
+---
+
+## Architecture Pipeline
+
+Boveda employs a 3-stage asynchronous producer-consumer pipeline:
+
+```mermaid
+flowchart TD
+    Scanner["Stage 1: Directory Walker\n(Fast filesystem discovery)"]
+    Queue1["Bounded Work Queue\n(Discovered file paths)"]
+    Pool["Stage 2: Parallel Hash Worker Pool\n(N Threads = CPU cores)"]
+    Queue2["Bounded Ingestion Queue\n(ScannedFile records)"]
+    Consumer["Stage 3: Batch DB Inserter\n(In-Memory CAS Cache + batchInsert)"]
+
+    Scanner --> Queue1
+    Queue1 --> Pool
+    Pool --> Queue2
+    Queue2 --> Consumer
+```
+
+1. **Stage 1 (Discovery)**: The producer walks the directory tree rapidly without hashing, placing file metadata into a bounded work queue.
+2. **Stage 2 (Parallel Hashing)**: A configurable pool of worker threads concurrently hashes file streams using chunked memory-efficient buffers.
+3. **Stage 3 (Batch Persistence)**: The database consumer drains batches of file records, resolves duplicate content fingerprints via the in-memory cache, and batch inserts records in single transactions.
 
 ---
 
@@ -253,10 +286,11 @@ src/main/
     ├── logging/
     │   └── LoggingConfig.kt    # Logback runtime level configuration
     ├── scanner/
-    │   ├── ScannedFile.kt          # Discovered file metadata model
-    │   └── DirectoryScanner.kt     # Recursive filesystem traverser (FileTreeDirectoryScanner)
+    │   ├── ScannedFile.kt              # Discovered file metadata model
+    │   ├── DirectoryScanner.kt         # Scanner interface & FileTreeDirectoryScanner
+    │   └── ParallelDirectoryScanner.kt # Multi-threaded producer-consumer scanner
     ├── progress/
-    │   └── ScanProgressIndicator.kt # Mordant progress indicator & ingestion speed metrics
+    │   └── ScanProgressIndicator.kt    # Mordant progress indicator & ingestion speed metrics
     ├── model/
     │   ├── FileRecords.kt          # Database query DTOs (FileRecord, FileRecordWithDuplicateRank)
     │   └── DuplicateStatistics.kt  # Duplicate statistics, percentile deciles, and formatters

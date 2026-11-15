@@ -36,6 +36,7 @@ class BovedaCommandTest {
         assertTrue(result.output.contains("--quiet"))
         assertTrue(result.output.contains("--duplicates-only"))
         assertTrue(result.output.contains("--batch-size"))
+        assertTrue(result.output.contains("--threads"))
         assertTrue(result.output.contains("--no-cache-warmup"))
     }
 
@@ -301,6 +302,26 @@ class BovedaCommandTest {
             assertEquals(0, result.statusCode)
             assertTrue(result.output.contains("Scanning directory: $tempDir"))
             assertTrue(result.output.contains("file.txt"))
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `threads option executes parallel scanning with specified thread count`() {
+        val tempDir = Files.createTempDirectory("clikt-threads-test")
+        try {
+            tempDir.resolve("t1.txt").writeText("thread content 1")
+            tempDir.resolve("t2.txt").writeText("thread content 2")
+
+            val command = BovedaCommand()
+            val result = command.test(listOf("-t", "2", tempDir.toString()))
+
+            assertEquals(0, result.statusCode)
+            assertTrue(result.output.contains("Scanning directory: $tempDir"))
+            assertTrue(result.output.contains("t1.txt"))
+            assertTrue(result.output.contains("t2.txt"))
+            assertTrue(result.output.contains("### ==== Selecting from DB ==== ###"))
         } finally {
             tempDir.toFile().deleteRecursively()
         }

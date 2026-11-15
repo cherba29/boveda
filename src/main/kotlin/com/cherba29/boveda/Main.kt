@@ -18,6 +18,7 @@ import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressState
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
+import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
@@ -55,6 +56,8 @@ typealias CacheStatistics = com.cherba29.boveda.cache.CacheStatistics
 typealias ScanProgressIndicator = com.cherba29.boveda.progress.ScanProgressIndicator
 typealias MordantScanProgressIndicator = com.cherba29.boveda.progress.MordantScanProgressIndicator
 typealias ScanProgressState = com.cherba29.boveda.progress.ScanProgressState
+typealias ParallelDirectoryScanner = com.cherba29.boveda.scanner.ParallelDirectoryScanner
+typealias FileTreeDirectoryScanner = com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 
 /**
  * Clikt command line interface for Boveda vault operations.
@@ -120,6 +123,11 @@ class BovedaCommand(
         help = "Number of files to batch per database transaction during scanning. Default is 1000."
     ).int().default(1000)
 
+    val threads: Int by option(
+        "-t", "--threads",
+        help = "Number of worker threads for parallel file hashing (defaults to available CPU cores)."
+    ).int().default(Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+
     val noCacheWarmup: Boolean by option(
         "--no-cache-warmup",
         help = "Disable pre-warming the in-memory deduplication cache from the database on startup."
@@ -137,8 +145,15 @@ class BovedaCommand(
             DatabaseFactory.connectInMemory("test")
         }
 
+        val scanner: DirectoryScanner = if (threads == 1) {
+            FileTreeDirectoryScanner()
+        } else {
+            ParallelDirectoryScanner(threadCount = threads)
+        }
+
         val service = serviceFactory?.invoke(repoDb) ?: BovedaService(
             database = repoDb,
+            scanner = scanner,
             batchSize = batchSize,
             warmUpCache = !noCacheWarmup
         )

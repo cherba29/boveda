@@ -19,6 +19,7 @@ import com.cherba29.boveda.model.formatBytesShort
 import com.cherba29.boveda.model.formatDuration
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
+import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
 import java.nio.file.Path
 import java.util.Locale
@@ -47,7 +48,7 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
  */
 class BovedaService(
     private val database: Database,
-    private val scanner: DirectoryScanner = FileTreeDirectoryScanner(),
+    val scanner: DirectoryScanner = ParallelDirectoryScanner(),
     private val deduplicateFiles: Boolean = true,
     val batchSize: Int = DEFAULT_BATCH_SIZE,
     val cache: DeduplicationCache = InMemoryDeduplicationCache(),
