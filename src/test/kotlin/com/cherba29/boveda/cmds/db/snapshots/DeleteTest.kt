@@ -36,9 +36,10 @@ class DeleteTest {
   @Test
   fun `delete command deletes existing snapshot and outputs success`() {
     val tempDir = Files.createTempDirectory("delete-test-dir")
+    val dbDir = Files.createTempDirectory("delete-test-db")
     try {
       tempDir.resolve("file.txt").writeText("content to delete")
-      val dbFile = tempDir.resolve("delete_db")
+      val dbFile = dbDir.resolve("delete_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -56,15 +57,17 @@ class DeleteTest {
       assertTrue(listResult.output.contains("No snapshots found in database."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `delete command throws UsageError when snapshot ID does not exist`() {
     val tempDir = Files.createTempDirectory("delete-not-found-dir")
+    val dbDir = Files.createTempDirectory("delete-not-found-db")
     try {
       tempDir.resolve("file.txt").writeText("some content")
-      val dbFile = tempDir.resolve("not_found_db")
+      val dbFile = dbDir.resolve("not_found_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -76,15 +79,17 @@ class DeleteTest {
       assertTrue(result.output.contains("Snapshot with ID 999 does not exist."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `delete command resolves database from parent DbCommand`() {
     val tempDir = Files.createTempDirectory("delete-parent-dir")
+    val dbDir = Files.createTempDirectory("delete-parent-db")
     try {
       tempDir.resolve("file.txt").writeText("parent content")
-      val dbFile = tempDir.resolve("parent_db")
+      val dbFile = dbDir.resolve("parent_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -96,6 +101,7 @@ class DeleteTest {
       assertTrue(result.output.contains("Snapshot 1 deleted successfully."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 

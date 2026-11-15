@@ -73,7 +73,7 @@ class BovedaService(
    */
   fun createSnapshot(rootPath: Path): RepoSnapshot = transaction(database) {
     RepoSnapshot.new {
-      this.rootPath = rootPath.toString()
+      this.rootPath = rootPath.invariantSeparatorsPathString
       this.isCompleted = false
     }
   }

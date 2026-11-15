@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import kotlin.io.path.createDirectories
+import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.io.path.writeText
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -86,9 +87,10 @@ class BovedaCommandTest {
   @Test
   fun `scan command populates database from directory argument`() {
     val tempDir = Files.createTempDirectory("clikt-scan-dir")
+    val dbDir = Files.createTempDirectory("clikt-scan-db")
     try {
       tempDir.resolve("doc.txt").writeText("clikt test content")
-      val dbFile = tempDir.resolve("scan_test_db")
+      val dbFile = dbDir.resolve("scan_test_db")
 
       val command = BovedaCommand()
       val result = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -98,19 +100,21 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("doc.txt"))
 
       // Verify H2 persistent database file was created
-      val h2Db = tempDir.resolve("scan_test_db.mv.db")
+      val h2Db = dbDir.resolve("scan_test_db.mv.db")
       assertTrue(Files.exists(h2Db))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `scan command with --db option populates database`() {
     val tempDir = Files.createTempDirectory("clikt-scan-db-opt")
+    val dbDir = Files.createTempDirectory("clikt-scan-db-opt-db")
     try {
       tempDir.resolve("file.txt").writeText("scan opt content")
-      val dbFile = tempDir.resolve("opt_db")
+      val dbFile = dbDir.resolve("opt_db")
 
       val command = BovedaCommand()
       val result = command.test(listOf("scan", tempDir.toString(), "--db", dbFile.toString()))
@@ -119,10 +123,11 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("Scanning directory: $tempDir"))
       assertTrue(result.output.contains("file.txt"))
 
-      val h2Db = tempDir.resolve("opt_db.mv.db")
+      val h2Db = dbDir.resolve("opt_db.mv.db")
       assertTrue(Files.exists(h2Db))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -167,10 +172,11 @@ class BovedaCommandTest {
   @Test
   fun `quiet flag in interactive terminal displays animated progress indicator`() {
     val tempDir = Files.createTempDirectory("clikt-quiet-interactive-test")
+    val dbDir = Files.createTempDirectory("clikt-quiet-interactive-db")
     try {
       tempDir.resolve("file1.txt").writeText("file 1 content")
       tempDir.resolve("file2.txt").writeText("file 2 content")
-      val dbFile = tempDir.resolve("interactive_db")
+      val dbFile = dbDir.resolve("interactive_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -184,15 +190,17 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("MB/s"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `algorithm option uses specified hashing algorithm`() {
     val tempDir = Files.createTempDirectory("clikt-algo-test")
+    val dbDir = Files.createTempDirectory("clikt-algo-db")
     try {
       tempDir.resolve("sample.txt").writeText("hello world")
-      val dbFile = tempDir.resolve("algo_db")
+      val dbFile = dbDir.resolve("algo_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -208,17 +216,19 @@ class BovedaCommandTest {
       )
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `batch-size option executes scan and records files in custom batch sizes`() {
     val tempDir = Files.createTempDirectory("clikt-batch-test")
+    val dbDir = Files.createTempDirectory("clikt-batch-db")
     try {
       tempDir.resolve("f1.txt").writeText("content 1")
       tempDir.resolve("f2.txt").writeText("content 2")
       tempDir.resolve("f3.txt").writeText("content 3")
-      val dbFile = tempDir.resolve("batch_db")
+      val dbFile = dbDir.resolve("batch_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -232,16 +242,18 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("f3.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `threads option executes parallel scanning with specified thread count`() {
     val tempDir = Files.createTempDirectory("clikt-threads-test")
+    val dbDir = Files.createTempDirectory("clikt-threads-db")
     try {
       tempDir.resolve("t1.txt").writeText("thread content 1")
       tempDir.resolve("t2.txt").writeText("thread content 2")
-      val dbFile = tempDir.resolve("threads_db")
+      val dbFile = dbDir.resolve("threads_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -254,15 +266,17 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("t2.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `scanner options configure work-stealing, parallel, and sequential strategies`() {
     val tempDir = Files.createTempDirectory("clikt-scanner-test")
+    val dbDir = Files.createTempDirectory("clikt-scanner-db")
     try {
       tempDir.resolve("test.txt").writeText("scanner strategy content")
-      val dbFile = tempDir.resolve("scanner_db")
+      val dbFile = dbDir.resolve("scanner_db")
 
       val command1 = BovedaCommand()
       val resultWs = command1.test(
@@ -293,15 +307,17 @@ class BovedaCommandTest {
       assertTrue(resultSeq.output.contains("test.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `no-cache-warmup flag executes without error`() {
     val tempDir = Files.createTempDirectory("clikt-no-warmup-test")
+    val dbDir = Files.createTempDirectory("clikt-no-warmup-db")
     try {
       tempDir.resolve("file.txt").writeText("data")
-      val dbFile = tempDir.resolve("warmup_db")
+      val dbFile = dbDir.resolve("warmup_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -313,6 +329,7 @@ class BovedaCommandTest {
       assertTrue(result.output.contains("file.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -343,9 +360,10 @@ class BovedaCommandTest {
   @Test
   fun `db command queries already populated database and prints query results`() {
     val tempDir = Files.createTempDirectory("clikt-db-query-test")
+    val dbDir = Files.createTempDirectory("clikt-db-query-db")
     try {
       tempDir.resolve("item.txt").writeText("database persistence test")
-      val dbFile = tempDir.resolve("query_db")
+      val dbFile = dbDir.resolve("query_db")
 
       val command = BovedaCommand()
       // 1. Scan directory into database
@@ -359,18 +377,20 @@ class BovedaCommandTest {
       assertTrue(dbResult.output.contains("item.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db print-duplicates subcommand queries latest snapshot and prints duplicate files and statistics`() {
     val tempDir = Files.createTempDirectory("clikt-print-dups-test")
+    val dbDir = Files.createTempDirectory("clikt-print-dups-db")
     try {
       val subDir = tempDir.resolve("sub").apply { createDirectories() }
       tempDir.resolve("f1.txt").writeText("duplicate content")
       subDir.resolve("f2.txt").writeText("duplicate content")
       tempDir.resolve("f3.txt").writeText("unique content")
-      val dbFile = tempDir.resolve("dups_db")
+      val dbFile = dbDir.resolve("dups_db")
 
       val command = BovedaCommand()
       // 1. Scan directory into database
@@ -401,15 +421,17 @@ class BovedaCommandTest {
       assertFalse(dupResult2.output.contains("f3.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db print-duplicates with no duplicates reports no duplicates found`() {
     val tempDir = Files.createTempDirectory("clikt-no-dup-test")
+    val dbDir = Files.createTempDirectory("clikt-no-dup-db")
     try {
       tempDir.resolve("unique.txt").writeText("unique content")
-      val dbFile = tempDir.resolve("no_dups_db")
+      val dbFile = dbDir.resolve("no_dups_db")
 
       val command = BovedaCommand()
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -420,6 +442,7 @@ class BovedaCommandTest {
       assertTrue(dupResult.output.contains("No duplicates found."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -435,13 +458,14 @@ class BovedaCommandTest {
   @Test
   fun `log-level DEBUG flag configures root logger and logs Exposed queries to stderr`() {
     val tempDir = Files.createTempDirectory("clikt-log-debug-test")
+    val dbDir = Files.createTempDirectory("clikt-log-debug-db")
     val originalErr = System.err
     val errStream = ByteArrayOutputStream()
 
     try {
       System.setErr(PrintStream(errStream))
       tempDir.resolve("file.txt").writeText("data")
-      val dbFile = tempDir.resolve("log_debug_db")
+      val dbFile = dbDir.resolve("log_debug_db")
 
       val command = BovedaCommand()
       val result = command.test(
@@ -456,19 +480,21 @@ class BovedaCommandTest {
     } finally {
       System.setErr(originalErr)
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `log-level WARN default suppresses Exposed queries from stderr`() {
     val tempDir = Files.createTempDirectory("clikt-log-warn-test")
+    val dbDir = Files.createTempDirectory("clikt-log-warn-db")
     val originalErr = System.err
     val errStream = ByteArrayOutputStream()
 
     try {
       System.setErr(PrintStream(errStream))
       tempDir.resolve("file.txt").writeText("data")
-      val dbFile = tempDir.resolve("log_warn_db")
+      val dbFile = dbDir.resolve("log_warn_db")
 
       val command = BovedaCommand()
       val result = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -481,6 +507,7 @@ class BovedaCommandTest {
     } finally {
       System.setErr(originalErr)
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -515,10 +542,11 @@ class BovedaCommandTest {
   @Test
   fun `db snapshots list displays formatted table for populated database`() {
     val tempDir = Files.createTempDirectory("clikt-list-snapshots-test")
+    val dbDir = Files.createTempDirectory("clikt-list-snapshots-db")
     try {
       tempDir.resolve("file1.txt").writeText("content 1")
       tempDir.resolve("file2.txt").writeText("content 2")
-      val dbFile = tempDir.resolve("snapshots_db")
+      val dbFile = dbDir.resolve("snapshots_db")
 
       val command = BovedaCommand()
       // 1. Scan directory to create snapshot
@@ -534,18 +562,20 @@ class BovedaCommandTest {
       assertTrue(listResult.output.contains("Total Size"))
       assertTrue(listResult.output.contains("Status"))
       assertTrue(listResult.output.contains("Completed"))
-      assertTrue(listResult.output.contains(tempDir.toString()))
+      assertTrue(listResult.output.contains(tempDir.invariantSeparatorsPathString))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db snapshots list inherits database path from db parent command`() {
     val tempDir = Files.createTempDirectory("clikt-parent-list-snapshots-test")
+    val dbDir = Files.createTempDirectory("clikt-parent-list-snapshots-db")
     try {
       tempDir.resolve("file.txt").writeText("content")
-      val dbFile = tempDir.resolve("parent_list_db")
+      val dbFile = dbDir.resolve("parent_list_db")
 
       val command = BovedaCommand()
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -555,18 +585,20 @@ class BovedaCommandTest {
       val listResult = command.test(listOf("db", dbFile.toString(), "snapshots", "list"))
       assertEquals(0, listResult.statusCode)
       assertTrue(listResult.output.contains("Completed"))
-      assertTrue(listResult.output.contains(tempDir.toString()))
+      assertTrue(listResult.output.contains(tempDir.invariantSeparatorsPathString))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db snapshots delete removes specified snapshot and outputs success`() {
     val tempDir = Files.createTempDirectory("clikt-delete-snapshots-test")
+    val dbDir = Files.createTempDirectory("clikt-delete-snapshots-db")
     try {
       tempDir.resolve("file1.txt").writeText("content")
-      val dbFile = tempDir.resolve("delete_db")
+      val dbFile = dbDir.resolve("delete_db")
 
       val command = BovedaCommand()
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -592,15 +624,17 @@ class BovedaCommandTest {
       assertTrue(listResultAfter.output.contains("No snapshots found in database."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db snapshots delete inherits database path from db parent command`() {
     val tempDir = Files.createTempDirectory("clikt-parent-delete-snapshots-test")
+    val dbDir = Files.createTempDirectory("clikt-parent-delete-snapshots-db")
     try {
       tempDir.resolve("file.txt").writeText("content")
-      val dbFile = tempDir.resolve("parent_delete_db")
+      val dbFile = dbDir.resolve("parent_delete_db")
 
       val command = BovedaCommand()
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -614,15 +648,17 @@ class BovedaCommandTest {
       assertTrue(deleteResult.output.contains("Snapshot 1 deleted successfully."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `db snapshots delete fails when snapshot does not exist`() {
     val tempDir = Files.createTempDirectory("clikt-delete-not-found-test")
+    val dbDir = Files.createTempDirectory("clikt-delete-not-found-db")
     try {
       tempDir.resolve("file.txt").writeText("content")
-      val dbFile = tempDir.resolve("not_found_db")
+      val dbFile = dbDir.resolve("not_found_db")
 
       val command = BovedaCommand()
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
@@ -636,6 +672,7 @@ class BovedaCommandTest {
       assertTrue(deleteResult.output.contains("Snapshot with ID 999 does not exist."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 

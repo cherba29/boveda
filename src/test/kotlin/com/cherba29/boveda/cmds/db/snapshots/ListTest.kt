@@ -7,6 +7,7 @@ import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.logging.LoggingConfig
 import com.github.ajalt.clikt.testing.test
 import java.nio.file.Files
+import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.io.path.writeText
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -54,9 +55,10 @@ class ListTest {
   @Test
   fun `list command outputs formatted table with snapshots`() {
     val tempDir = Files.createTempDirectory("list-table-test")
+    val dbDir = Files.createTempDirectory("list-table-db")
     try {
       tempDir.resolve("sample.txt").writeText("content for list")
-      val dbFile = tempDir.resolve("list_db")
+      val dbFile = dbDir.resolve("list_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -71,18 +73,20 @@ class ListTest {
       assertTrue(result.output.contains("Total Size"))
       assertTrue(result.output.contains("Status"))
       assertTrue(result.output.contains("Completed"))
-      assertTrue(result.output.contains(tempDir.toString()))
+      assertTrue(result.output.contains(tempDir.invariantSeparatorsPathString))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `list command resolves database path from parent DbCommand`() {
     val tempDir = Files.createTempDirectory("list-parent-db-test")
+    val dbDir = Files.createTempDirectory("list-parent-db")
     try {
       tempDir.resolve("doc.txt").writeText("parent db content")
-      val dbFile = tempDir.resolve("parent_db")
+      val dbFile = dbDir.resolve("parent_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -92,9 +96,10 @@ class ListTest {
 
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("Completed"))
-      assertTrue(result.output.contains(tempDir.toString()))
+      assertTrue(result.output.contains(tempDir.invariantSeparatorsPathString))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 

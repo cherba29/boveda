@@ -41,9 +41,10 @@ class ScanTest {
   @Test
   fun `scan command populates database from directory argument`() {
     val tempDir = Files.createTempDirectory("scan-test-dir")
+    val dbDir = Files.createTempDirectory("scan-test-db")
     try {
       tempDir.resolve("file.txt").writeText("scan test content")
-      val dbFile = tempDir.resolve("test_db")
+      val dbFile = dbDir.resolve("test_db")
 
       val command = ScanCommand()
       val result = command.test(listOf(tempDir.toString(), dbFile.toString()))
@@ -51,18 +52,20 @@ class ScanTest {
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("Scanning directory: $tempDir"))
       assertTrue(result.output.contains("file.txt"))
-      assertTrue(Files.exists(tempDir.resolve("test_db.mv.db")))
+      assertTrue(Files.exists(dbDir.resolve("test_db.mv.db")))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `scan command with --db option populates database`() {
     val tempDir = Files.createTempDirectory("scan-opt-dir")
+    val dbDir = Files.createTempDirectory("scan-opt-db")
     try {
       tempDir.resolve("item.txt").writeText("scan option content")
-      val dbFile = tempDir.resolve("opt_db")
+      val dbFile = dbDir.resolve("opt_db")
 
       val command = ScanCommand()
       val result = command.test(listOf(tempDir.toString(), "--db", dbFile.toString()))
@@ -70,9 +73,10 @@ class ScanTest {
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("Scanning directory: $tempDir"))
       assertTrue(result.output.contains("item.txt"))
-      assertTrue(Files.exists(tempDir.resolve("opt_db.mv.db")))
+      assertTrue(Files.exists(dbDir.resolve("opt_db.mv.db")))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -137,9 +141,10 @@ class ScanTest {
   @Test
   fun `scan command with custom algorithm, batch-size, and scanner strategies`() {
     val tempDir = Files.createTempDirectory("scan-custom-dir")
+    val dbDir = Files.createTempDirectory("scan-custom-db")
     try {
       tempDir.resolve("sample.txt").writeText("custom strategy content")
-      val dbFile = tempDir.resolve("custom_db")
+      val dbFile = dbDir.resolve("custom_db")
 
       val command = ScanCommand()
       val result = command.test(
@@ -158,6 +163,7 @@ class ScanTest {
       assertTrue(result.output.contains("sample.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 }

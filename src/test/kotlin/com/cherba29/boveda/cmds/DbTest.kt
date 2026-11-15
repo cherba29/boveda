@@ -37,9 +37,10 @@ class DbTest {
   @Test
   fun `db command queries already populated database and prints results`() {
     val tempDir = Files.createTempDirectory("db-test-dir")
+    val dbDir = Files.createTempDirectory("db-test-db")
     try {
       tempDir.resolve("entry.txt").writeText("database query test")
-      val dbFile = tempDir.resolve("query_db")
+      val dbFile = dbDir.resolve("query_db")
 
       // Scan directory into database
       val scanCmd = ScanCommand()
@@ -55,6 +56,7 @@ class DbTest {
       assertTrue(dbResult.output.contains("entry.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
@@ -79,9 +81,10 @@ class DbTest {
   @Test
   fun `db command with snapshot option queries specified snapshot`() {
     val tempDir = Files.createTempDirectory("db-snap-opt-dir")
+    val dbDir = Files.createTempDirectory("db-snap-opt-db")
     try {
       tempDir.resolve("f.txt").writeText("content")
-      val dbFile = tempDir.resolve("snap_db")
+      val dbFile = dbDir.resolve("snap_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -94,6 +97,7 @@ class DbTest {
       assertTrue(result.output.contains("f.txt"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 

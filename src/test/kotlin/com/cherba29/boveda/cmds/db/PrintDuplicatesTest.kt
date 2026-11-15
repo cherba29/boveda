@@ -39,12 +39,13 @@ class PrintDuplicatesTest {
   @Test
   fun `print-duplicates outputs duplicate files and duplication summary statistics`() {
     val tempDir = Files.createTempDirectory("print-dups-test-dir")
+    val dbDir = Files.createTempDirectory("print-dups-test-db")
     try {
       val subDir = tempDir.resolve("sub").apply { createDirectories() }
       tempDir.resolve("f1.txt").writeText("duplicate content")
       subDir.resolve("f2.txt").writeText("duplicate content")
       tempDir.resolve("unique.txt").writeText("unique content")
-      val dbFile = tempDir.resolve("dups_db")
+      val dbFile = dbDir.resolve("dups_db")
 
       val scanCmd = ScanCommand()
       assertEquals(
@@ -67,15 +68,17 @@ class PrintDuplicatesTest {
       assertTrue(result.output.contains("Total Wasted Storage:"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `print-duplicates reports no duplicates when all files are unique`() {
     val tempDir = Files.createTempDirectory("print-no-dups-dir")
+    val dbDir = Files.createTempDirectory("print-no-dups-db")
     try {
       tempDir.resolve("unique.txt").writeText("unique data")
-      val dbFile = tempDir.resolve("no_dups_db")
+      val dbFile = dbDir.resolve("no_dups_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -87,15 +90,17 @@ class PrintDuplicatesTest {
       assertTrue(result.output.contains("No duplicates found."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 
   @Test
   fun `print-duplicates resolves database path when invoked under DbCommand`() {
     val tempDir = Files.createTempDirectory("print-dups-parent-dir")
+    val dbDir = Files.createTempDirectory("print-dups-parent-db")
     try {
       tempDir.resolve("file.txt").writeText("content")
-      val dbFile = tempDir.resolve("parent_db")
+      val dbFile = dbDir.resolve("parent_db")
 
       val scanCmd = ScanCommand()
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
@@ -107,6 +112,7 @@ class PrintDuplicatesTest {
       assertTrue(result.output.contains("### ==== Duplicate Files in DB ==== ###"))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 

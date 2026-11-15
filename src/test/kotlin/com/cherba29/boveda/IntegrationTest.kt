@@ -63,9 +63,10 @@ class IntegrationTest {
   @Test
   fun `main function runs successfully with scan and db subcommands`() {
     val tempDir = Files.createTempDirectory("boveda-main-e2e")
+    val dbDir = Files.createTempDirectory("boveda-main-e2e-db")
     try {
       tempDir.resolve("sample.txt").writeText("sample file for main")
-      val dbFile = tempDir.resolve("main_test_db")
+      val dbFile = dbDir.resolve("main_test_db")
 
       val originalOut = System.out
       val outputStream = ByteArrayOutputStream()
@@ -88,6 +89,7 @@ class IntegrationTest {
       assertTrue(output.contains("Snapshot 1 deleted successfully."))
     } finally {
       tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
     }
   }
 }
