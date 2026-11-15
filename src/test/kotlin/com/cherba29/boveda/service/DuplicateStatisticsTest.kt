@@ -1,6 +1,7 @@
 package com.cherba29.boveda.service
 
 import com.cherba29.boveda.db.DatabaseFactory
+import com.cherba29.boveda.model.PercentileBucket
 import com.cherba29.boveda.model.formatBytes
 import com.cherba29.boveda.model.formatBytesShort
 import com.cherba29.boveda.model.formatDuration
@@ -118,6 +119,10 @@ class DuplicateStatisticsTest {
         val totalBucketDuplicated = stats.percentileBuckets.sumOf { it.totalDuplicateBytes }
         assertEquals(stats.totalDuplicateBytes, totalBucketDuplicated)
 
+        val totalBucketSize = stats.percentileBuckets.sumOf { it.sizeBytes }
+        assertEquals(totalBucketDuplicated - totalBucketWasted, totalBucketSize)
+        assertTrue(totalBucketSize > 0)
+
         // Percentage sums to 100%
         val totalPct = stats.percentileBuckets.sumOf { it.percentageOfTotalWasted }
         assertEquals(100.0, Math.round(totalPct * 100.0) / 100.0)
@@ -195,8 +200,63 @@ class DuplicateStatisticsTest {
         assertTrue(output.contains("Wasted Storage:"))
         assertTrue(output.contains("Top 10 Largest Duplicate Files:"))
         assertTrue(output.contains("Percentile Buckets by File Size (10% Deciles):"))
+        assertTrue(output.contains("Percentile"))
+        assertTrue(output.contains("Size Range"))
+        assertTrue(output.contains("Files"))
+        assertTrue(output.contains("Size"))
+        assertTrue(output.contains("Duplicated Storage"))
+        assertTrue(output.contains("Wasted Storage"))
+        assertTrue(output.contains("Share (%)"))
         assertTrue(output.contains("0% - 10%"))
         assertTrue(output.contains("90% - 100%"))
+        assertTrue(output.contains("Total"))
         assertTrue(output.contains("Total Processing Time:     800ms"))
+    }
+
+    @Test
+    fun `formatPercentileTable formats table with Mordant and shows totals row`() {
+        val (service, _) = createService()
+        val snapshot = service.createSnapshot(Paths.get("/vault"))
+
+        for (i in 1..10) {
+            val size = i * 1024L
+            val hash = "hash_$i"
+            service.recordFile(snapshot, ScannedFile(Paths.get("a/$i.bin"), "a/$i.bin", size, hash))
+            service.recordFile(snapshot, ScannedFile(Paths.get("b/$i.bin"), "b/$i.bin", size, hash))
+        }
+
+        val stats = service.computeDuplicateStatistics(snapshot.id.value, 500.milliseconds)
+        val tableString = service.formatPercentileTable(stats)
+
+        assertTrue(tableString.contains("Percentile"))
+        assertTrue(tableString.contains("Size Range"))
+        assertTrue(tableString.contains("Files"))
+        assertTrue(tableString.contains("Size"))
+        assertTrue(tableString.contains("Duplicated Storage"))
+        assertTrue(tableString.contains("Wasted Storage"))
+        assertTrue(tableString.contains("Share (%)"))
+        assertTrue(tableString.contains("Total"))
+        // Total files = 10 * 2 = 20
+        assertTrue(tableString.contains("20"))
+        // Total wasted = 55 KB
+        assertTrue(tableString.contains("100.00%"))
+    }
+
+    @Test
+    fun `PercentileBucket backward-compatible constructor computes sizeBytes`() {
+        @Suppress("DEPRECATION")
+        val bucket = PercentileBucket(
+            bucketIndex = 1,
+            percentileRange = "0% - 10%",
+            minSize = 100L,
+            maxSize = 200L,
+            fileCount = 4,
+            totalDuplicateBytes = 800L,
+            wastedBytes = 600L,
+            percentageOfTotalWasted = 10.0
+        )
+        assertEquals(200L, bucket.sizeBytes) // 800 - 600
+        assertEquals(800L, bucket.totalDuplicateBytes)
+        assertEquals(600L, bucket.wastedBytes)
     }
 }

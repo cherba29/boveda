@@ -32,6 +32,7 @@ data class DuplicateGroup(
  * @property minSize The minimum file size in bytes in this bucket.
  * @property maxSize The maximum file size in bytes in this bucket.
  * @property fileCount The number of duplicate file instances in this bucket.
+ * @property sizeBytes The total unique content size in bytes in this bucket.
  * @property totalDuplicateBytes The total duplicated storage occupied by files in this bucket.
  * @property wastedBytes The total redundant/wasted storage in this bucket ((copies - 1) * size).
  * @property percentageOfTotalWasted The percentage of total wasted storage accounted for by this bucket.
@@ -42,10 +43,33 @@ data class PercentileBucket(
     val minSize: Long,
     val maxSize: Long,
     val fileCount: Int,
+    val sizeBytes: Long,
     val totalDuplicateBytes: Long,
     val wastedBytes: Long,
     val percentageOfTotalWasted: Double
-)
+) {
+    /** Backward-compatible constructor computing sizeBytes as totalDuplicateBytes - wastedBytes. */
+    constructor(
+        bucketIndex: Int,
+        percentileRange: String,
+        minSize: Long,
+        maxSize: Long,
+        fileCount: Int,
+        totalDuplicateBytes: Long,
+        wastedBytes: Long,
+        percentageOfTotalWasted: Double
+    ) : this(
+        bucketIndex = bucketIndex,
+        percentileRange = percentileRange,
+        minSize = minSize,
+        maxSize = maxSize,
+        fileCount = fileCount,
+        sizeBytes = totalDuplicateBytes - wastedBytes,
+        totalDuplicateBytes = totalDuplicateBytes,
+        wastedBytes = wastedBytes,
+        percentageOfTotalWasted = percentageOfTotalWasted
+    )
+}
 
 /**
  * Summary statistics describing scanned files, duplication metrics, top duplicate examples,

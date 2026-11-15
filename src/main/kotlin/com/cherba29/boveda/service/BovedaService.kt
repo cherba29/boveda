@@ -22,6 +22,10 @@ import com.cherba29.boveda.scanner.FileTreeDirectoryScanner
 import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.ScannedFile
 import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
+import com.github.ajalt.mordant.rendering.BorderType
+import com.github.ajalt.mordant.rendering.TextAlign
+import com.github.ajalt.mordant.table.table
+import com.github.ajalt.mordant.terminal.Terminal
 import java.nio.file.Path
 import java.util.Locale
 import kotlin.io.path.invariantSeparatorsPathString
@@ -403,6 +407,7 @@ class BovedaService(
                     minSize = 0L,
                     maxSize = 0L,
                     fileCount = 0,
+                    sizeBytes = 0L,
                     totalDuplicateBytes = 0L,
                     wastedBytes = 0L,
                     percentageOfTotalWasted = 0.0
@@ -422,6 +427,7 @@ class BovedaService(
         return bucketLists.mapIndexed { index, items ->
             val start = index * 10
             val end = (index + 1) * 10
+            val bucketSize = items.sumOf { it.size }
             val bucketWasted = items.sumOf { it.wastedBytes }
             val bucketDuplicated = items.sumOf { it.totalDuplicateBytes }
             val pct = if (totalWastedBytes > 0) {
@@ -434,11 +440,84 @@ class BovedaService(
                 minSize = items.minOfOrNull { it.size } ?: 0L,
                 maxSize = items.maxOfOrNull { it.size } ?: 0L,
                 fileCount = items.sumOf { it.copyCount },
+                sizeBytes = bucketSize,
                 totalDuplicateBytes = bucketDuplicated,
                 wastedBytes = bucketWasted,
                 percentageOfTotalWasted = pct
             )
         }
+    }
+
+    /**
+     * Formats the 10% percentile decile buckets into an aligned table rendered by Mordant.
+     * Includes a column for total file size in each decile, and a footer row showing totals for
+     * Files, Size, Duplicated Storage, Wasted Storage, and Share.
+     */
+    fun formatPercentileTable(stats: DuplicateStatistics, terminal: Terminal = Terminal()): String {
+        val totalFiles = stats.percentileBuckets.sumOf { it.fileCount.toLong() }
+        val totalSize = stats.percentileBuckets.sumOf { it.sizeBytes }
+        val totalDuplicated = stats.percentileBuckets.sumOf { it.totalDuplicateBytes }
+        val totalWasted = stats.percentileBuckets.sumOf { it.wastedBytes }
+        val totalShare = stats.percentileBuckets.sumOf { it.percentageOfTotalWasted }
+
+        val activeBuckets = stats.percentileBuckets.filter { it.fileCount > 0 }
+        val overallRange = if (activeBuckets.isNotEmpty()) {
+            "[${formatBytesShort(activeBuckets.minOf { it.minSize })} - ${formatBytesShort(activeBuckets.maxOf { it.maxSize })}]"
+        } else "-"
+
+        val mordantTable = table {
+            borderType = BorderType.SQUARE_DOUBLE_SECTION_SEPARATOR
+            header {
+                style(bold = true)
+                row("Percentile", "Size Range", "Files", "Size", "Duplicated Storage", "Wasted Storage", "Share (%)")
+            }
+            body {
+                for (bucket in stats.percentileBuckets) {
+                    val rangeStr = "[${formatBytesShort(bucket.minSize)} - ${formatBytesShort(bucket.maxSize)}]"
+                    row(
+                        bucket.percentileRange,
+                        rangeStr,
+                        String.format(Locale.US, "%,d", bucket.fileCount),
+                        formatBytesShort(bucket.sizeBytes),
+                        formatBytesShort(bucket.totalDuplicateBytes),
+                        formatBytesShort(bucket.wastedBytes),
+                        String.format(Locale.US, "%.2f%%", bucket.percentageOfTotalWasted)
+                    )
+                }
+            }
+            footer {
+                style(bold = true)
+                row(
+                    "Total",
+                    overallRange,
+                    String.format(Locale.US, "%,d", totalFiles),
+                    formatBytesShort(totalSize),
+                    formatBytesShort(totalDuplicated),
+                    formatBytesShort(totalWasted),
+                    String.format(Locale.US, "%.2f%%", totalShare)
+                )
+            }
+            column(0) { align = TextAlign.LEFT }
+            column(1) { align = TextAlign.CENTER }
+            column(2) { align = TextAlign.RIGHT }
+            column(3) { align = TextAlign.RIGHT }
+            column(4) { align = TextAlign.RIGHT }
+            column(5) { align = TextAlign.RIGHT }
+            column(6) { align = TextAlign.RIGHT }
+        }
+        val naturalWidth = mordantTable.measure(terminal, 1000).max
+        val renderTerminal = if (terminal.size.width < naturalWidth) {
+            Terminal(
+                ansiLevel = terminal.terminalInfo.ansiLevel,
+                theme = terminal.theme,
+                width = naturalWidth,
+                hyperlinks = terminal.terminalInfo.ansiHyperLinks,
+                tabWidth = terminal.tabWidth
+            )
+        } else {
+            terminal
+        }
+        return renderTerminal.render(mordantTable)
     }
 
     /**
@@ -489,16 +568,7 @@ class BovedaService(
         out(sep)
         out("Percentile Buckets by File Size (10% Deciles):")
         out(sep)
-        out("Percentile  Size Range              Files  Duplicated Storage   Wasted Storage  Share (%)")
-        out(sep)
-        stats.percentileBuckets.forEach { bucket ->
-            val rangeStr = "[${formatBytesShort(bucket.minSize)} - ${formatBytesShort(bucket.maxSize)}]".padEnd(20)
-            val filesStr = String.format(Locale.US, "%,d", bucket.fileCount).padStart(7)
-            val dupStr = formatBytesShort(bucket.totalDuplicateBytes).padStart(19)
-            val wastedStr = formatBytesShort(bucket.wastedBytes).padStart(16)
-            val pctStr = String.format(Locale.US, "%6.2f%%", bucket.percentageOfTotalWasted)
-            out("${bucket.percentileRange.padEnd(10)}  $rangeStr$filesStr$dupStr$wastedStr  $pctStr")
-        }
+        formatPercentileTable(stats).lines().forEach { out(it) }
         out(sep)
         out("Total Wasted Storage: ${formatBytes(stats.wastedBytes)}")
         out(line)
