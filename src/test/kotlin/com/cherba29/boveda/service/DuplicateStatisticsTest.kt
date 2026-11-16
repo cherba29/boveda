@@ -101,6 +101,50 @@ class DuplicateStatisticsTest {
   }
 
   @Test
+  fun `computeDuplicateStatistics orders top duplicate entries by combined duplicate space`() {
+    val (service, _) = createService()
+    val snapshot = service.createSnapshot(Paths.get("/vault"))
+
+    // Three 5MB files -> Combined = 15MB
+    val fiveMb = 5L * 1024L * 1024L
+    service.recordFile(
+      snapshot,
+      ScannedFile(Paths.get("f5_1.bin"), "f5_1.bin", fiveMb, "hash_5mb")
+    )
+    service.recordFile(
+      snapshot,
+      ScannedFile(Paths.get("f5_2.bin"), "f5_2.bin", fiveMb, "hash_5mb")
+    )
+    service.recordFile(
+      snapshot,
+      ScannedFile(Paths.get("f5_3.bin"), "f5_3.bin", fiveMb, "hash_5mb")
+    )
+
+    // Two 7MB files -> Combined = 14MB
+    val sevenMb = 7L * 1024L * 1024L
+    service.recordFile(
+      snapshot,
+      ScannedFile(Paths.get("f7_1.bin"), "f7_1.bin", sevenMb, "hash_7mb")
+    )
+    service.recordFile(
+      snapshot,
+      ScannedFile(Paths.get("f7_2.bin"), "f7_2.bin", sevenMb, "hash_7mb")
+    )
+
+    val stats = service.computeDuplicateStatistics(snapshot.id.value, 100.milliseconds)
+
+    assertEquals(2, stats.largestDuplicates.size)
+    // 5MB group with 3 copies (15MB combined) must appear before 7MB group with 2 copies (14MB combined)
+    assertEquals("hash_5mb", stats.largestDuplicates[0].hash)
+    assertEquals(15L * 1024L * 1024L, stats.largestDuplicates[0].totalDuplicateBytes)
+    assertEquals(3, stats.largestDuplicates[0].copyCount)
+
+    assertEquals("hash_7mb", stats.largestDuplicates[1].hash)
+    assertEquals(14L * 1024L * 1024L, stats.largestDuplicates[1].totalDuplicateBytes)
+    assertEquals(2, stats.largestDuplicates[1].copyCount)
+  }
+
+  @Test
   fun `computeDuplicateStatistics generates 10 percentile buckets with valid bounds and sums`() {
     val (service, _) = createService()
     val snapshot = service.createSnapshot(Paths.get("/vault"))

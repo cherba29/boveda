@@ -16,7 +16,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
 - **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across snapshots.
 - **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status. Delete unneeded snapshots by ID with automatic cascade deletion of file instances and orphaned file metadata.
-- **Duplication & Storage Statistics with Mordant Table**: With `boveda db print-duplicates`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 largest duplicate groups, and a Mordant-rendered 10% percentile deciles table featuring total file size (`Size`) per decile and summed totals in the footer row.
+- **Duplication & Storage Statistics with Mordant Table**: With `boveda db print-duplicates`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 duplicate groups ordered by combined duplicate space, and a Mordant-rendered 10% percentile deciles table featuring total file size (`Size`) per decile and summed totals in the footer row.
 - **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
 - **Rich CLI with Clikt**: Structured command-line interface with subcommands, path validation, custom hashing algorithm selection, quiet mode, persistent database options, and snapshot targeting.
 - **GraalVM Native Image Ready**: Configured with GraalVM Native Build Tools to compile into a fast, standalone native binary without JVM startup overhead.
@@ -132,7 +132,7 @@ Commands:
 
 ### 3. `db print-duplicates` Subcommand
 
-Queries the database for duplicate files (files sharing identical content hashes within a snapshot) and prints duplication overview metrics, the top 10 largest duplicate files, and a Mordant percentile decile table:
+Queries the database for duplicate files (files sharing identical content hashes within a snapshot) and prints duplication overview metrics, the top 10 duplicate groups ordered by combined duplicate space, and a Mordant percentile decile table:
 
 ```text
 Usage: boveda db print-duplicates [<options>] [<database>]
@@ -260,12 +260,12 @@ Duplication Overview:
 --------------------------------------------------------------------------------
 Top 10 Largest Duplicate Files:
 --------------------------------------------------------------------------------
- 1. 25.40 MB | 2 copies | Wasted: 25.40 MB
+ 1. 25.40 MB | 2 copies | Combined: 50.80 MB | Wasted: 25.40 MB
     Hash: 4f1a...
     Paths:
       - /data/backup/video1.mp4
       - /data/media/video1.mp4
- 2. 12.10 MB | 3 copies | Wasted: 24.20 MB
+ 2. 12.10 MB | 3 copies | Combined: 36.30 MB | Wasted: 24.20 MB
     Hash: a82c...
     Paths:
       - /data/docs/archive.tar

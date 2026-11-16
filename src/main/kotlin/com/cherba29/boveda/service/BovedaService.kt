@@ -557,7 +557,9 @@ class BovedaService(
 
       val largest10 = duplicateGroups
         .sortedWith(
-          compareByDescending<DuplicateGroup> { it.size }.thenByDescending { it.wastedBytes }
+          compareByDescending<DuplicateGroup> { it.totalDuplicateBytes }
+            .thenByDescending { it.size }
+            .thenByDescending { it.wastedBytes }
         )
         .take(10)
 
@@ -837,9 +839,9 @@ class BovedaService(
       stats.largestDuplicates.forEachIndexed { idx, group ->
         val num = (idx + 1).toString().padStart(2)
         out(
-          "$num. ${formatBytes(
-            group.size
-          )} | ${group.copyCount} copies | Wasted: ${formatBytes(group.wastedBytes)}"
+          "$num. ${formatBytes(group.size)} | ${group.copyCount} copies | " +
+            "Combined: ${formatBytes(group.totalDuplicateBytes)} | " +
+            "Wasted: ${formatBytes(group.wastedBytes)}"
         )
         out("    Hash: ${group.hash}")
         out("    Paths:")
