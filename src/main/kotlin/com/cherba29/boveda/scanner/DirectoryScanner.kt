@@ -28,6 +28,17 @@ interface DirectoryScanner {
     rootPath: Path,
     algorithm: String = "XXH3",
     shouldSkip: ((DiscoveredFile) -> Boolean)? = null
+  ): Sequence<ScannedFile> = scan(rootPath, algorithm, shouldSkip, maxBytes = null)
+
+  /**
+   * Recursively scans [rootPath] and yields a [Sequence] of [ScannedFile] entries,
+   * hashing at most [maxBytes] per file as well as the file size.
+   */
+  fun scan(
+    rootPath: Path,
+    algorithm: String = "XXH3",
+    shouldSkip: ((DiscoveredFile) -> Boolean)? = null,
+    maxBytes: Long? = null
   ): Sequence<ScannedFile> = if (shouldSkip == null) {
     scan(rootPath, algorithm)
   } else {
@@ -41,23 +52,33 @@ interface DirectoryScanner {
  * Default implementation of [DirectoryScanner] using Kotlin's [Path.walk] API.
  *
  * @property hasher The [FileHasher] used to compute hashes for discovered files.
+ * @property maxBytes Maximum initial bytes to hash per file (null = full file).
  */
 class FileTreeDirectoryScanner(
-  private val hasher: FileHasher = MessageDigestFileHasher()
+  private val hasher: FileHasher = MessageDigestFileHasher(),
+  private val maxBytes: Long? = null
 ) : DirectoryScanner {
 
   override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
-    scan(rootPath, algorithm, shouldSkip = null)
+    scan(rootPath, algorithm, shouldSkip = null, maxBytes = null)
 
   override fun scan(
     rootPath: Path,
     algorithm: String,
     shouldSkip: ((DiscoveredFile) -> Boolean)?
+  ): Sequence<ScannedFile> = scan(rootPath, algorithm, shouldSkip, maxBytes = null)
+
+  override fun scan(
+    rootPath: Path,
+    algorithm: String,
+    shouldSkip: ((DiscoveredFile) -> Boolean)?,
+    maxBytes: Long?
   ): Sequence<ScannedFile> {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
     val normalizedRoot = rootPath.normalize()
+    val effectiveMaxBytes = maxBytes ?: this.maxBytes
 
     return normalizedRoot.walk()
       .filter { it.isRegularFile() }
@@ -93,7 +114,7 @@ class FileTreeDirectoryScanner(
           return@mapNotNull null
         }
 
-        val hash = hasher.computeHash(normalizedFilePath.toFile(), algorithm)
+        val hash = hasher.computeHash(normalizedFilePath.toFile(), algorithm, effectiveMaxBytes)
 
         ScannedFile(
           path = normalizedFilePath,

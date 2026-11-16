@@ -26,7 +26,8 @@ import kotlin.io.path.walk
 class ParallelDirectoryScanner(
   val threadCount: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1),
   private val hasher: FileHasher = MessageDigestFileHasher(),
-  private val queueCapacity: Int = DEFAULT_QUEUE_CAPACITY
+  private val queueCapacity: Int = DEFAULT_QUEUE_CAPACITY,
+  private val maxBytes: Long? = null
 ) : DirectoryScanner {
 
   companion object {
@@ -65,17 +66,25 @@ class ParallelDirectoryScanner(
   }
 
   override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
-    scan(rootPath, algorithm, shouldSkip = null)
+    scan(rootPath, algorithm, shouldSkip = null, maxBytes = null)
 
   override fun scan(
     rootPath: Path,
     algorithm: String,
     shouldSkip: ((DiscoveredFile) -> Boolean)?
+  ): Sequence<ScannedFile> = scan(rootPath, algorithm, shouldSkip, maxBytes = null)
+
+  override fun scan(
+    rootPath: Path,
+    algorithm: String,
+    shouldSkip: ((DiscoveredFile) -> Boolean)?,
+    maxBytes: Long?
   ): Sequence<ScannedFile> {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
     val normalizedRoot = rootPath.normalize()
+    val effectiveMaxBytes = maxBytes ?: this.maxBytes
 
     return sequence {
       val workQueue = ArrayBlockingQueue<WorkItem>(queueCapacity)
@@ -160,7 +169,7 @@ class ParallelDirectoryScanner(
                 break
               }
               if (item is WorkItem.FileItem) {
-                val hash = hasher.computeHash(item.path.toFile(), algorithm)
+                val hash = hasher.computeHash(item.path.toFile(), algorithm, effectiveMaxBytes)
                 val scannedFile = ScannedFile(
                   path = item.path,
                   relativePath = item.relativePath,

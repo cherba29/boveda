@@ -30,7 +30,8 @@ class WorkStealingDirectoryScanner(
   val parallelism: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1),
   private val hasher: FileHasher = MessageDigestFileHasher(),
   private val queueCapacity: Int = DEFAULT_QUEUE_CAPACITY,
-  private val fileChunkSize: Int = DEFAULT_FILE_CHUNK_SIZE
+  private val fileChunkSize: Int = DEFAULT_FILE_CHUNK_SIZE,
+  private val maxBytes: Long? = null
 ) : DirectoryScanner {
 
   companion object {
@@ -65,14 +66,15 @@ class WorkStealingDirectoryScanner(
     private val files: List<DiscoveredFile>,
     private val algorithm: String,
     private val hasher: FileHasher,
-    private val resultQueue: BlockingQueue<ResultItem>
+    private val resultQueue: BlockingQueue<ResultItem>,
+    private val maxBytes: Long? = null
   ) : RecursiveAction() {
 
     override fun compute() {
       for (file in files) {
         if (Thread.currentThread().isInterrupted) return
         try {
-          val hash = hasher.computeHash(file.path.toFile(), algorithm)
+          val hash = hasher.computeHash(file.path.toFile(), algorithm, maxBytes)
           val scanned = ScannedFile(
             path = file.path,
             relativePath = file.relativePath,
@@ -98,7 +100,8 @@ class WorkStealingDirectoryScanner(
     private val hasher: FileHasher,
     private val resultQueue: BlockingQueue<ResultItem>,
     private val fileChunkSize: Int,
-    private val shouldSkip: ((DiscoveredFile) -> Boolean)? = null
+    private val shouldSkip: ((DiscoveredFile) -> Boolean)? = null,
+    private val maxBytes: Long? = null
   ) : RecursiveAction() {
 
     override fun compute() {
@@ -122,7 +125,8 @@ class WorkStealingDirectoryScanner(
                   hasher = hasher,
                   resultQueue = resultQueue,
                   fileChunkSize = fileChunkSize,
-                  shouldSkip = shouldSkip
+                  shouldSkip = shouldSkip,
+                  maxBytes = maxBytes
                 )
               )
             } else if (Files.isRegularFile(normalizedEntry)) {
@@ -172,7 +176,8 @@ class WorkStealingDirectoryScanner(
               files = chunk,
               algorithm = algorithm,
               hasher = hasher,
-              resultQueue = resultQueue
+              resultQueue = resultQueue,
+              maxBytes = maxBytes
             )
           )
         }
@@ -190,17 +195,25 @@ class WorkStealingDirectoryScanner(
   }
 
   override fun scan(rootPath: Path, algorithm: String): Sequence<ScannedFile> =
-    scan(rootPath, algorithm, shouldSkip = null)
+    scan(rootPath, algorithm, shouldSkip = null, maxBytes = null)
 
   override fun scan(
     rootPath: Path,
     algorithm: String,
     shouldSkip: ((DiscoveredFile) -> Boolean)?
+  ): Sequence<ScannedFile> = scan(rootPath, algorithm, shouldSkip, maxBytes = null)
+
+  override fun scan(
+    rootPath: Path,
+    algorithm: String,
+    shouldSkip: ((DiscoveredFile) -> Boolean)?,
+    maxBytes: Long?
   ): Sequence<ScannedFile> {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
     val normalizedRoot = rootPath.normalize()
+    val effectiveMaxBytes = maxBytes ?: this.maxBytes
 
     return sequence {
       val resultQueue = ArrayBlockingQueue<ResultItem>(queueCapacity)
@@ -220,7 +233,8 @@ class WorkStealingDirectoryScanner(
         hasher = hasher,
         resultQueue = resultQueue,
         fileChunkSize = fileChunkSize,
-        shouldSkip = shouldSkip
+        shouldSkip = shouldSkip,
+        maxBytes = effectiveMaxBytes
       )
 
       val rootFuture = pool.submit(rootTask)

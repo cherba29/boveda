@@ -152,4 +152,88 @@ class FileHasherTest {
       tempFile.delete()
     }
   }
+
+  @Test
+  fun `parseByteSize parses standard human readable and numeric byte formats`() {
+    assertEquals(null, parseByteSize(null))
+    assertEquals(null, parseByteSize(""))
+    assertEquals(null, parseByteSize("full"))
+    assertEquals(null, parseByteSize("full size"))
+    assertEquals(null, parseByteSize("all"))
+    assertEquals(null, parseByteSize("max"))
+
+    assertEquals(65536L, parseByteSize("64Kb"))
+    assertEquals(65536L, parseByteSize("64KB"))
+    assertEquals(65536L, parseByteSize("64kb"))
+    assertEquals(65536L, parseByteSize("64k"))
+
+    assertEquals(131072L, parseByteSize("128Kb"))
+    assertEquals(262144L, parseByteSize("256Kb"))
+    assertEquals(524288L, parseByteSize("512Kb"))
+    assertEquals(1048576L, parseByteSize("1Mb"))
+    assertEquals(1048576L, parseByteSize("1MB"))
+    assertEquals(1048576L, parseByteSize("1M"))
+
+    assertEquals(1024L, parseByteSize("1024"))
+    assertEquals(1024L, parseByteSize("1024 bytes"))
+    assertEquals(1024L, parseByteSize("1024b"))
+
+    assertFailsWith<IllegalArgumentException> { parseByteSize("abc") }
+    assertFailsWith<IllegalArgumentException> { parseByteSize("0") }
+    assertFailsWith<IllegalArgumentException> { parseByteSize("-10kb") }
+  }
+
+  @Test
+  fun `computeHash with maxBytes only hashes up to prefix and incorporates file size`() {
+    val dir = Files.createTempDirectory("hasher-prefix-test")
+    try {
+      val prefix = "X".repeat(1024)
+
+      // fileA: 2048 bytes (prefix + "A" * 1024)
+      val fileA = dir.resolve("fileA.bin").toFile()
+      fileA.writeText(prefix + "A".repeat(1024))
+
+      // fileB: 2048 bytes (prefix + "B" * 1024) - same size as fileA, same 1024 prefix, different trailing bytes
+      val fileB = dir.resolve("fileB.bin").toFile()
+      fileB.writeText(prefix + "B".repeat(1024))
+
+      // fileC: 4096 bytes (prefix + "A" * 3072) - different size, same 1024 prefix
+      val fileC = dir.resolve("fileC.bin").toFile()
+      fileC.writeText(prefix + "A".repeat(3072))
+
+      // fileD: 2048 bytes ("Y" * 1024 + "A" * 1024) - same size as fileA, different prefix
+      val fileD = dir.resolve("fileD.bin").toFile()
+      fileD.writeText("Y".repeat(1024) + "A".repeat(1024))
+
+      val limit = 1024L
+
+      // 1. Same size and same prefix up to limit -> same hash!
+      val hashA = hasher.computeHash(fileA, "XXH3", maxBytes = limit)
+      val hashB = hasher.computeHash(fileB, "XXH3", maxBytes = limit)
+      assertEquals(hashA, hashB)
+
+      // 2. Different size with same prefix -> different hash!
+      val hashC = hasher.computeHash(fileC, "XXH3", maxBytes = limit)
+      assertTrue(hashA != hashC)
+
+      // 3. Same size with different prefix -> different hash!
+      val hashD = hasher.computeHash(fileD, "XXH3", maxBytes = limit)
+      assertTrue(hashA != hashD)
+
+      // 4. Full size without maxBytes -> fileA and fileB have different hashes
+      val fullHashA = hasher.computeHash(fileA, "XXH3", maxBytes = null)
+      val fullHashB = hasher.computeHash(fileB, "XXH3", maxBytes = null)
+      assertTrue(fullHashA != fullHashB)
+
+      // 5. Works identically with MD5
+      val md5A = hasher.computeHash(fileA, "MD5", maxBytes = limit)
+      val md5B = hasher.computeHash(fileB, "MD5", maxBytes = limit)
+      assertEquals(md5A, md5B)
+
+      val md5C = hasher.computeHash(fileC, "MD5", maxBytes = limit)
+      assertTrue(md5A != md5C)
+    } finally {
+      dir.toFile().deleteRecursively()
+    }
+  }
 }

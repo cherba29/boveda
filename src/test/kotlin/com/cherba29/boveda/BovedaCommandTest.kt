@@ -40,6 +40,7 @@ class BovedaCommandTest {
     assertTrue(scanResult.output.contains("<directory>"))
     assertTrue(scanResult.output.contains("<database>"))
     assertTrue(scanResult.output.contains("--algorithm"))
+    assertTrue(scanResult.output.contains("--max-hash-bytes"))
     assertTrue(scanResult.output.contains("--db"))
     assertTrue(scanResult.output.contains("--quiet"))
     assertTrue(scanResult.output.contains("--batch-size"))

@@ -41,6 +41,7 @@ class ScanTest {
     assertTrue(result.output.contains("<database>"))
     assertTrue(result.output.contains("--continue"))
     assertTrue(result.output.contains("--algorithm"))
+    assertTrue(result.output.contains("--max-hash-bytes"))
     assertTrue(result.output.contains("--db"))
     assertTrue(result.output.contains("--quiet"))
     assertTrue(result.output.contains("--batch-size"))
@@ -387,6 +388,70 @@ class ScanTest {
         "file1.txt should have been skipped without hashing"
       )
       assertTrue(hashedFiles.contains("file2.txt"), "file2.txt should have been hashed")
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with --max-hash-bytes option hashes up to specified prefix size`() {
+    val tempDir = Files.createTempDirectory("scan-maxbytes-test")
+    val dbDir = Files.createTempDirectory("scan-maxbytes-db")
+    try {
+      val prefix = "P".repeat(65536) // 64Kb prefix
+
+      // file1 and file2 have same size (100000 bytes) and same 64Kb prefix, but different suffix
+      tempDir.resolve("file1.bin").toFile().writeText(prefix + "A".repeat(34464))
+      tempDir.resolve("file2.bin").toFile().writeText(prefix + "B".repeat(34464))
+
+      val dbFile = dbDir.resolve("scan_maxbytes.db")
+      val command = ScanCommand()
+
+      val result = command.test(
+        listOf(
+          "-m",
+          "64Kb",
+          tempDir.toString(),
+          dbFile.toString()
+        )
+      )
+
+      assertEquals(0, result.statusCode)
+
+      val service = BovedaService(database = DatabaseFactory.connectFile(dbFile.toString()))
+      val files = service.queryFiles()
+      assertEquals(2, files.size)
+
+      // Both files must have the same hash because they have the same size and matching 64Kb prefix!
+      assertEquals(files[0].hash, files[1].hash)
+      assertEquals(100000L, files[0].size)
+      assertEquals(100000L, files[1].size)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with invalid --max-hash-bytes fails with usage error`() {
+    val tempDir = Files.createTempDirectory("scan-invalid-maxbytes")
+    val dbDir = Files.createTempDirectory("scan-invalid-maxbytes-db")
+    try {
+      val dbFile = dbDir.resolve("scan.db")
+      val command = ScanCommand()
+
+      val result = command.test(
+        listOf(
+          "--max-hash-bytes",
+          "invalid-size-xyz",
+          tempDir.toString(),
+          dbFile.toString()
+        )
+      )
+
+      assertEquals(1, result.statusCode)
+      assertTrue(result.output.contains("Invalid value for --max-hash-bytes"))
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

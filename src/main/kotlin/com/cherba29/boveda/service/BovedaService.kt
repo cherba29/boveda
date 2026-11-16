@@ -365,6 +365,7 @@ class BovedaService(
     rootPath: Path,
     algorithm: String = "XXH3",
     resumeSnapshotId: Int? = null,
+    maxBytes: Long? = null,
     onFileScanned: ((ScannedFile) -> Unit)? = null
   ): RepoSnapshot {
     if (deduplicateFiles && warmUpCache) {
@@ -397,7 +398,8 @@ class BovedaService(
     val scannedFiles = scanner.scan(
       rootPath = rootPath,
       algorithm = algorithm,
-      shouldSkip = if (resumeSnapshotId != null) shouldSkip else null
+      shouldSkip = if (resumeSnapshotId != null) shouldSkip else null,
+      maxBytes = maxBytes
     ).onEach { file ->
       onFileScanned?.invoke(file)
     }

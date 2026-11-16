@@ -11,7 +11,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs.
 - **Multi-Threaded Producer-Consumer Pipeline**: Decouples directory walking (Stage 1), cryptographic hashing across worker thread pools (Stage 2), and database persistence (Stage 3) via bounded queues for maximum multi-core CPU utilization.
 - **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
-- **Streaming File Hashing**: Fast, chunk-based hashing (XXH3 default, MD5, SHA-256, SHA-512, etc.) that handles large files efficiently without loading them entirely into memory.
+- **Streaming File Hashing & Prefix-Only Option (`--max-hash-bytes`)**: Fast, chunk-based hashing (XXH3 default, MD5, SHA-256, SHA-512, etc.) that handles large files efficiently. Supports optional prefix hashing (`64Kb`, `128Kb`, `256Kb`, `512Kb`, `1Mb`, or full size) combined with file size for lightning-fast comparison of multi-gigabyte files.
 - **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
 - **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across snapshots.
@@ -90,6 +90,8 @@ Options:
   -c, --continue=<int>    Resume an incomplete directory scan for the given snapshot ID.
   -d, --db=<path>         Target database file path.
   -a, --algorithm=<text>  File hashing algorithm (e.g. XXH3, MD5, SHA-256, SHA-512). Default is XXH3.
+  -m, --max-hash-bytes=<size>
+                          Maximum initial bytes to hash per file as well as file size (e.g. 64Kb, 128Kb, 256Kb, 512Kb, 1Mb, full). Default is full file.
   -q, --quiet             Suppress per-file progress output during directory scan.
   -b, --batch-size=<int>  Number of files to batch per database transaction during scanning. Default is 1000.
   -t, --threads=<int>     Number of worker threads for parallel file hashing (defaults to available CPU cores).

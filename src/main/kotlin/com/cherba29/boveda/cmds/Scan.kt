@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
+import com.cherba29.boveda.hash.parseByteSize
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.progress.MordantScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
@@ -70,6 +71,16 @@ class ScanCommand(
     "--algorithm",
     help = "File hashing algorithm (e.g. XXH3, MD5, SHA-256, SHA-512). Default is XXH3."
   ).default("XXH3")
+
+  val maxHashBytesOption: String? by option(
+    "-m",
+    "--max-hash-bytes",
+    "--max-hash-size",
+    "--hash-prefix-size",
+    "--hash-bytes",
+    help = "Maximum initial bytes to hash per file as well as the file size " +
+      "(e.g. 64Kb, 128Kb, 256Kb, 512Kb, 1Mb, full). Default is full file."
+  )
 
   val quiet: Boolean by option(
     "-q",
@@ -163,17 +174,23 @@ class ScanCommand(
       else -> throw UsageError("Target database must be specified as an argument or via --db")
     }
 
+    val maxHashBytes = try {
+      parseByteSize(maxHashBytesOption)
+    } catch (e: Exception) {
+      throw UsageError("Invalid value for --max-hash-bytes: ${e.message}")
+    }
+
     val effectiveScannerType = if (workStealing) "work-stealing" else scannerType
 
     val scanner: DirectoryScanner = when {
       threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true) -> {
-        FileTreeDirectoryScanner()
+        FileTreeDirectoryScanner(maxBytes = maxHashBytes)
       }
       effectiveScannerType.equals("parallel", ignoreCase = true) -> {
-        ParallelDirectoryScanner(threadCount = threads)
+        ParallelDirectoryScanner(threadCount = threads, maxBytes = maxHashBytes)
       }
       else -> {
-        WorkStealingDirectoryScanner(parallelism = threads)
+        WorkStealingDirectoryScanner(parallelism = threads, maxBytes = maxHashBytes)
       }
     }
 
@@ -243,7 +260,8 @@ class ScanCommand(
       service.scanAndRecord(
         rootPath = targetDirectory,
         algorithm = algorithm,
-        resumeSnapshotId = continueId
+        resumeSnapshotId = continueId,
+        maxBytes = maxHashBytes
       ) { file ->
         if (!quiet) {
           echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
