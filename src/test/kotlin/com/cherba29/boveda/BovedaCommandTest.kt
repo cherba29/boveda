@@ -400,8 +400,10 @@ class BovedaCommandTest {
       )
       assertEquals(0, scanResult.statusCode)
 
-      // 2. Query duplicates using db print-duplicates (database on subcommand)
-      val dupResult1 = command.test(listOf("db", "print-duplicates", dbFile.toString()))
+      // 2. Query duplicates using db print-duplicates --verbose (database on subcommand)
+      val dupResult1 = command.test(
+        listOf("db", "print-duplicates", "--verbose", dbFile.toString())
+      )
       assertEquals(0, dupResult1.statusCode)
       assertTrue(dupResult1.output.contains("### ==== Duplicate Files in DB ==== ###"))
       assertTrue(dupResult1.output.contains("f1.txt"))
@@ -413,13 +415,23 @@ class BovedaCommandTest {
       assertTrue(dupResult1.output.contains("Percentile Buckets by File Size (10% Deciles):"))
       assertTrue(dupResult1.output.contains("Total Processing Time:"))
 
-      // 3. Query duplicates using db <DATABASE> print-duplicates (database on parent command)
-      val dupResult2 = command.test(listOf("db", dbFile.toString(), "print-duplicates"))
+      // 3. Query duplicates using db <DATABASE> print-duplicates --verbose (database on parent command)
+      val dupResult2 = command.test(
+        listOf("db", dbFile.toString(), "print-duplicates", "--verbose")
+      )
       assertEquals(0, dupResult2.statusCode)
       assertTrue(dupResult2.output.contains("### ==== Duplicate Files in DB ==== ###"))
       assertTrue(dupResult2.output.contains("f1.txt"))
       assertTrue(dupResult2.output.contains("f2.txt"))
       assertFalse(dupResult2.output.contains("f3.txt"))
+
+      // 4. Query duplicates without --verbose (only summary and top 10, no individual duplicate file entries)
+      val dupResultDefault = command.test(listOf("db", "print-duplicates", dbFile.toString()))
+      assertEquals(0, dupResultDefault.statusCode)
+      assertFalse(dupResultDefault.output.contains("### ==== Duplicate Files in DB ==== ###"))
+      assertFalse(dupResultDefault.output.contains("snapshot="))
+      assertTrue(dupResultDefault.output.contains("DUPLICATION SUMMARY"))
+      assertTrue(dupResultDefault.output.contains("Top 10 Largest Duplicate Files:"))
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

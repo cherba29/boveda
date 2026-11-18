@@ -74,7 +74,7 @@ class IntegrationTest {
         System.setOut(PrintStream(outputStream))
         main(arrayOf("scan", tempDir.toString(), dbFile.toString()))
         main(arrayOf("db", dbFile.toString()))
-        main(arrayOf("db", "print-duplicates", dbFile.toString()))
+        main(arrayOf("db", "print-duplicates", "--verbose", dbFile.toString()))
         main(arrayOf("db", "snapshots", "list", dbFile.toString()))
         main(arrayOf("db", "snapshots", "delete", "1", dbFile.toString()))
       } finally {

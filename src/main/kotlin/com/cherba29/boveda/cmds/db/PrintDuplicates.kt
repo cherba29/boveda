@@ -10,6 +10,7 @@ import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.optional
+import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.int
@@ -46,6 +47,12 @@ class PrintDuplicatesCommand(
     help = "Optional snapshot ID to query. Defaults to the latest snapshot."
   ).int()
 
+  val verbose: Boolean by option(
+    "-v",
+    "--verbose",
+    help = "Print every duplicate file entry found in the database."
+  ).flag(default = false)
+
   val logLevel: Level? by option(
     "-l",
     "--log-level",
@@ -75,11 +82,14 @@ class PrintDuplicatesCommand(
       return
     }
 
-    echo("### ==== Duplicate Files in DB ==== ###")
     val duplicates = service.findDuplicates(snapshot.id.value)
     if (duplicates.isEmpty()) {
+      if (verbose) {
+        echo("### ==== Duplicate Files in DB ==== ###")
+      }
       echo("No duplicates found.")
-    } else {
+    } else if (verbose) {
+      echo("### ==== Duplicate Files in DB ==== ###")
       duplicates.forEach { record ->
         echo(
           "snapshot=${record.snapshotId} size=${record.size} " +

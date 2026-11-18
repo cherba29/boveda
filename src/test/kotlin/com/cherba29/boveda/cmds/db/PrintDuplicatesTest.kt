@@ -33,11 +33,12 @@ class PrintDuplicatesTest {
     assertTrue(result.output.contains("<database>"))
     assertTrue(result.output.contains("--db"))
     assertTrue(result.output.contains("--snapshot"))
+    assertTrue(result.output.contains("--verbose"))
     assertTrue(result.output.contains("--log-level"))
   }
 
   @Test
-  fun `print-duplicates outputs duplicate files and duplication summary statistics`() {
+  fun `print-duplicates with verbose flag outputs duplicate files and duplication summary statistics`() {
     val tempDir = Files.createTempDirectory("print-dups-test-dir")
     val dbDir = Files.createTempDirectory("print-dups-test-db")
     try {
@@ -54,13 +55,47 @@ class PrintDuplicatesTest {
       )
 
       val printDupCmd = PrintDuplicatesCommand()
-      val result = printDupCmd.test(listOf(dbFile.toString()))
+      val result = printDupCmd.test(listOf("--verbose", dbFile.toString()))
 
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("### ==== Duplicate Files in DB ==== ###"))
       assertTrue(result.output.contains("f1.txt"))
       assertTrue(result.output.contains("f2.txt"))
       assertFalse(result.output.contains("unique.txt"))
+      assertTrue(result.output.contains("DUPLICATION SUMMARY"))
+      assertTrue(result.output.contains("Scan & Ingestion Statistics:"))
+      assertTrue(result.output.contains("Top 10 Largest Duplicate Files:"))
+      assertTrue(result.output.contains("Percentile Buckets by File Size (10% Deciles):"))
+      assertTrue(result.output.contains("Total Wasted Storage:"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `print-duplicates without verbose flag only outputs summary and top 10 without individual entries`() {
+    val tempDir = Files.createTempDirectory("print-dups-noverbose-dir")
+    val dbDir = Files.createTempDirectory("print-dups-noverbose-db")
+    try {
+      val subDir = tempDir.resolve("sub").apply { createDirectories() }
+      tempDir.resolve("f1.txt").writeText("duplicate content")
+      subDir.resolve("f2.txt").writeText("duplicate content")
+      tempDir.resolve("unique.txt").writeText("unique content")
+      val dbFile = dbDir.resolve("dups_noverbose_db")
+
+      val scanCmd = ScanCommand()
+      assertEquals(
+        0,
+        scanCmd.test(listOf("--quiet", tempDir.toString(), dbFile.toString())).statusCode
+      )
+
+      val printDupCmd = PrintDuplicatesCommand()
+      val result = printDupCmd.test(listOf(dbFile.toString()))
+
+      assertEquals(0, result.statusCode)
+      assertFalse(result.output.contains("### ==== Duplicate Files in DB ==== ###"))
+      assertFalse(result.output.contains("snapshot="))
       assertTrue(result.output.contains("DUPLICATION SUMMARY"))
       assertTrue(result.output.contains("Scan & Ingestion Statistics:"))
       assertTrue(result.output.contains("Top 10 Largest Duplicate Files:"))
@@ -106,7 +141,7 @@ class PrintDuplicatesTest {
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
 
       val dbCmd = DbCommand()
-      val result = dbCmd.test(listOf(dbFile.toString(), "print-duplicates"))
+      val result = dbCmd.test(listOf(dbFile.toString(), "print-duplicates", "--verbose"))
 
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("### ==== Duplicate Files in DB ==== ###"))
