@@ -1,9 +1,11 @@
 package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
+import com.cherba29.boveda.cmds.db.FileCommand
 import com.cherba29.boveda.cmds.db.PrintDuplicatesCommand
 import com.cherba29.boveda.cmds.db.SnapshotsCommand
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -21,7 +23,8 @@ import org.jetbrains.exposed.v1.jdbc.Database
  * Clikt subcommand for querying an already existing/computed database.
  */
 class DbCommand(
-  private val serviceFactory: ((Database) -> BovedaService)? = null
+  private val serviceFactory: ((Database) -> BovedaService)? = null,
+  private val selector: ((DuplicateGroup) -> List<String>?)? = null
 ) : CliktCommand(
   name = "db"
 ) {
@@ -64,7 +67,8 @@ class DbCommand(
   init {
     subcommands(
       PrintDuplicatesCommand(serviceFactory),
-      SnapshotsCommand(serviceFactory)
+      SnapshotsCommand(serviceFactory),
+      FileCommand(serviceFactory, selector)
     )
   }
 

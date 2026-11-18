@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
@@ -21,7 +22,8 @@ import org.jetbrains.exposed.v1.jdbc.Database
  */
 class BovedaCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null,
-  private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null
+  private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null,
+  private val selector: ((DuplicateGroup) -> List<String>?)? = null
 ) : CliktCommand(
   name = "boveda"
 ) {
@@ -46,7 +48,7 @@ class BovedaCommand(
   init {
     subcommands(
       ScanCommand(serviceFactory, progressIndicatorFactory),
-      DbCommand(serviceFactory)
+      DbCommand(serviceFactory, selector)
     )
   }
 

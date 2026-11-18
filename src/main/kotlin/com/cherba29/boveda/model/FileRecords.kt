@@ -48,3 +48,18 @@ data class SnapshotSummary(
   val fileCount: Long,
   val totalBytes: Long
 )
+
+/**
+ * Result model representing the deletion outcome of a file from disk and database.
+ *
+ * @property path The recorded file path.
+ * @property deletedFromDisk Whether the file was deleted from the filesystem.
+ * @property deletedFromDb Whether the file instance was deleted from the database.
+ * @property hasDuplicates Whether the file content was duplicated in the snapshot prior to deletion.
+ */
+data class FileDeletionResult(
+  val path: String,
+  val deletedFromDisk: Boolean,
+  val deletedFromDb: Boolean,
+  val hasDuplicates: Boolean
+)

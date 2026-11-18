@@ -11,6 +11,7 @@ import com.cherba29.boveda.db.RepoSnapshot
 import com.cherba29.boveda.db.RepoSnapshots
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.model.DuplicateStatistics
+import com.cherba29.boveda.model.FileDeletionResult
 import com.cherba29.boveda.model.FileRecord
 import com.cherba29.boveda.model.FileRecordWithDuplicateRank
 import com.cherba29.boveda.model.PercentileBucket
@@ -26,6 +27,7 @@ import com.github.ajalt.mordant.rendering.BorderType
 import com.github.ajalt.mordant.rendering.TextAlign
 import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.terminal.Terminal
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
 import kotlin.io.path.invariantSeparatorsPathString
@@ -309,6 +311,192 @@ class BovedaService(
     }
     snapshot.delete()
     true
+  }
+
+  /**
+   * Finds a [RepoFileInstance] matching [path] within [snapshotId].
+   * Handles absolute, relative, or snapshot root-relative path matching.
+   */
+  fun findFileInstance(snapshotId: Int, path: Path): RepoFileInstance? = transaction(database) {
+    val absPathStr = path.toAbsolutePath().normalize().invariantSeparatorsPathString
+    val relPathStr = path.normalize().invariantSeparatorsPathString
+    val rawPathStr = path.invariantSeparatorsPathString
+
+    var instance = RepoFileInstance.find {
+      (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq absPathStr)
+    }.firstOrNull()
+
+    if (instance == null) {
+      instance = RepoFileInstance.find {
+        (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq relPathStr)
+      }.firstOrNull()
+    }
+
+    if (instance == null) {
+      instance = RepoFileInstance.find {
+        (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq rawPathStr)
+      }.firstOrNull()
+    }
+
+    if (instance == null) {
+      val snapshot = RepoSnapshot.findById(snapshotId)
+      if (snapshot != null) {
+        val rootResolved = Path.of(snapshot.rootPath).resolve(path)
+          .normalize().invariantSeparatorsPathString
+        instance = RepoFileInstance.find {
+          (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq rootResolved)
+        }.firstOrNull()
+      }
+    }
+
+    instance
+  }
+
+  /**
+   * Counts the number of file instances in [snapshotId] referencing [fileId].
+   */
+  fun countFileDuplicates(snapshotId: Int, fileId: EntityID<Int>): Long = transaction(database) {
+    RepoFileInstances.select(RepoFileInstances.id)
+      .where { (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.file eq fileId) }
+      .count()
+  }
+
+  /**
+   * Removes a file instance from the database and disk within [snapshotId].
+   * If the file has no duplicates, deletion fails unless [force] is true.
+   */
+  fun deleteFile(snapshotId: Int, path: Path, force: Boolean = false): FileDeletionResult =
+    transaction(database) {
+      val instance = findFileInstance(snapshotId, path)
+        ?: throw IllegalArgumentException("File not found in database: $path")
+
+      val fileEntityId = instance.file.id
+      val dupCount = countFileDuplicates(snapshotId, fileEntityId)
+      val hasDuplicates = dupCount > 1
+
+      if (!hasDuplicates && !force) {
+        throw IllegalStateException(
+          "File does not have duplicates: $path. Use --force to delete anyway."
+        )
+      }
+
+      val pathStr = instance.path
+      val diskPath = Path.of(pathStr)
+      val actualDiskPath = if (Files.exists(diskPath)) diskPath else path
+      val deletedFromDisk = try {
+        Files.deleteIfExists(actualDiskPath)
+      } catch (_: Exception) {
+        false
+      }
+
+      instance.delete()
+
+      val remaining = RepoFileInstances.select(RepoFileInstances.id)
+        .where { RepoFileInstances.file eq fileEntityId }
+        .count()
+      if (remaining == 0L) {
+        RepoFiles.deleteWhere { RepoFiles.id eq fileEntityId }
+      }
+
+      FileDeletionResult(
+        path = pathStr,
+        deletedFromDisk = deletedFromDisk,
+        deletedFromDb = true,
+        hasDuplicates = hasDuplicates
+      )
+    }
+
+  /**
+   * Deletes multiple duplicate file instances by path from disk and database in [snapshotId].
+   */
+  fun deleteDuplicateFiles(snapshotId: Int, paths: List<String>): List<FileDeletionResult> =
+    transaction(database) {
+      val fileIdsToCheck = mutableSetOf<EntityID<Int>>()
+      val results = paths.map { pathStr ->
+        val p = Path.of(pathStr)
+        val deletedFromDisk = try {
+          Files.deleteIfExists(p)
+        } catch (_: Exception) {
+          false
+        }
+
+        val instance = RepoFileInstance.find {
+          (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq pathStr)
+        }.firstOrNull()
+
+        val deletedFromDb = if (instance != null) {
+          fileIdsToCheck.add(instance.file.id)
+          instance.delete()
+          true
+        } else {
+          false
+        }
+
+        FileDeletionResult(
+          path = pathStr,
+          deletedFromDisk = deletedFromDisk,
+          deletedFromDb = deletedFromDb,
+          hasDuplicates = true
+        )
+      }
+
+      for (fileId in fileIdsToCheck) {
+        val remaining = RepoFileInstances.select(RepoFileInstances.id)
+          .where { RepoFileInstances.file eq fileId }
+          .count()
+        if (remaining == 0L) {
+          RepoFiles.deleteWhere { RepoFiles.id eq fileId }
+        }
+      }
+
+      results
+    }
+
+  /**
+   * Retrieves all groups of duplicate file instances in [snapshotId] sharing content hash and size.
+   */
+  fun getDuplicateGroups(snapshotId: Int): List<DuplicateGroup> = transaction(database) {
+    val instances = (RepoFileInstances innerJoin RepoFiles)
+      .select(
+        RepoFileInstances.id,
+        RepoFileInstances.path,
+        RepoFiles.id,
+        RepoFiles.size,
+        RepoFiles.hash
+      )
+      .where { RepoFileInstances.snapshot eq snapshotId }
+      .toList()
+
+    val groupedByFile = instances.groupBy { it[RepoFiles.id].value }
+
+    groupedByFile.values
+      .filter { it.size > 1 }
+      .map { rows ->
+        val first = rows.first()
+        DuplicateGroup(
+          hash = first[RepoFiles.hash],
+          size = first[RepoFiles.size],
+          copyCount = rows.size,
+          paths = rows.map { it[RepoFileInstances.path] }
+        )
+      }
+  }
+
+  /**
+   * Finds the duplicate group in [snapshotId] where most storage is wasted,
+   * excluding any hashes in [excludedHashes].
+   */
+  fun findLargestDuplicateGroup(
+    snapshotId: Int,
+    excludedHashes: Set<String> = emptySet()
+  ): DuplicateGroup? {
+    val groups = getDuplicateGroups(snapshotId).filter { it.hash !in excludedHashes }
+    return groups.maxWithOrNull(
+      compareBy<DuplicateGroup> { it.wastedBytes }
+        .thenBy { it.totalDuplicateBytes }
+        .thenBy { it.size }
+        .thenBy { it.hash }
+    )
   }
 
   /**

@@ -39,9 +39,29 @@ fun resolveDatabasePath(
       val p = cmd.dbPath ?: cmd.dbOption
       if (p != null) return p
     }
+    if (cmd is com.cherba29.boveda.cmds.db.FileCommand) {
+      val p = cmd.dbPath ?: cmd.dbOption
+      if (p != null) return p
+    }
     if (cmd is com.cherba29.boveda.cmds.DbCommand) {
       val p = cmd.dbPath ?: cmd.dbOption
       if (p != null) return p
+    }
+    current = current.parent
+  }
+  return null
+}
+
+/**
+ * Resolves the snapshot ID by checking local options first and falling back to ancestor DbCommand.
+ */
+fun resolveSnapshotId(context: Context, localSnapshotId: Int? = null): Int? {
+  if (localSnapshotId != null) return localSnapshotId
+  var current: Context? = context.parent
+  while (current != null) {
+    val cmd = current.command
+    if (cmd is com.cherba29.boveda.cmds.DbCommand) {
+      if (cmd.snapshotIdOption != null) return cmd.snapshotIdOption
     }
     current = current.parent
   }

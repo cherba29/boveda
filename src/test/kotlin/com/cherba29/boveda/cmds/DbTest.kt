@@ -32,6 +32,7 @@ class DbTest {
     assertTrue(result.output.contains("--log-level"))
     assertTrue(result.output.contains("print-duplicates"))
     assertTrue(result.output.contains("snapshots"))
+    assertTrue(result.output.contains("file"))
   }
 
   @Test

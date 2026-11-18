@@ -641,4 +641,88 @@ class BovedaServiceTest {
     assertTrue(entries.keys.any { it.endsWith("file1.txt") })
     assertTrue(entries.keys.any { it.endsWith("file2.txt") })
   }
+
+  @Test
+  fun `deleteFile removes instance and cleans up orphaned file when no more references exist`() {
+    val (service, db) = createService()
+    val snap = service.createSnapshot(Paths.get("/testroot"))
+
+    val dupFile1 = ScannedFile(Paths.get("/testroot/d1.txt"), "d1.txt", 100L, "hashD")
+    val dupFile2 = ScannedFile(Paths.get("/testroot/d2.txt"), "d2.txt", 100L, "hashD")
+    service.recordFiles(snap, listOf(dupFile1, dupFile2))
+    service.completeSnapshot(snap)
+
+    // Initially 1 RepoFile and 2 RepoFileInstances
+    transaction(db) {
+      assertEquals(1, RepoFile.all().count())
+      assertEquals(2, RepoFileInstance.all().count())
+    }
+
+    transaction(db) {
+      val inst = service.findFileInstance(snap.id.value, Paths.get("/testroot/d1.txt"))
+      kotlin.test.assertNotNull(inst)
+      assertEquals(2L, service.countFileDuplicates(snap.id.value, inst.file.id))
+    }
+
+    // Delete first copy (duplicates exist, so force = false succeeds)
+    val res1 = service.deleteFile(snap.id.value, Paths.get("/testroot/d1.txt"), force = false)
+    assertTrue(res1.deletedFromDb)
+    assertTrue(res1.hasDuplicates)
+
+    transaction(db) {
+      assertEquals(1, RepoFile.all().count())
+      assertEquals(1, RepoFileInstance.all().count())
+    }
+
+    // Now only 1 copy remains. Attempting to delete without force should throw IllegalStateException
+    kotlin.test.assertFailsWith<IllegalStateException> {
+      service.deleteFile(snap.id.value, Paths.get("/testroot/d2.txt"), force = false)
+    }
+
+    // Deleting with force = true should succeed and remove orphaned RepoFile
+    val res2 = service.deleteFile(snap.id.value, Paths.get("/testroot/d2.txt"), force = true)
+    assertTrue(res2.deletedFromDb)
+    assertFalse(res2.hasDuplicates)
+
+    transaction(db) {
+      assertEquals(0, RepoFile.all().count())
+      assertEquals(0, RepoFileInstance.all().count())
+    }
+  }
+
+  @Test
+  fun `getDuplicateGroups and findLargestDuplicateGroup accurately locate most wasted storage`() {
+    val (service, _) = createService()
+    val snap = service.createSnapshot(Paths.get("/vault"))
+
+    // Small group: 3 copies of 200 bytes (wasted: 400 bytes)
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/s1.txt"), "s1.txt", 200L, "hashSmall"))
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/s2.txt"), "s2.txt", 200L, "hashSmall"))
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/s3.txt"), "s3.txt", 200L, "hashSmall"))
+
+    // Large group: 2 copies of 1000 bytes (wasted: 1000 bytes)
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/l1.txt"), "l1.txt", 1000L, "hashLarge"))
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/l2.txt"), "l2.txt", 1000L, "hashLarge"))
+
+    // Unique file: 1 copy of 5000 bytes (wasted: 0)
+    service.recordFile(snap, ScannedFile(Paths.get("/vault/u.txt"), "u.txt", 5000L, "hashUnique"))
+
+    val groups = service.getDuplicateGroups(snap.id.value)
+    assertEquals(2, groups.size)
+
+    val largest = service.findLargestDuplicateGroup(snap.id.value)
+    kotlin.test.assertNotNull(largest)
+    assertEquals("hashLarge", largest.hash)
+    assertEquals(1000L, largest.wastedBytes)
+    assertEquals(2000L, largest.totalDuplicateBytes)
+
+    // With hashLarge excluded, hashSmall should be returned
+    val nextLargest = service.findLargestDuplicateGroup(
+      snap.id.value,
+      excludedHashes = setOf("hashLarge")
+    )
+    kotlin.test.assertNotNull(nextLargest)
+    assertEquals("hashSmall", nextLargest.hash)
+    assertEquals(400L, nextLargest.wastedBytes)
+  }
 }
