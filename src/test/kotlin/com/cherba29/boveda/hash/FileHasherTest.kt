@@ -60,6 +60,22 @@ class FileHasherTest {
   }
 
   @Test
+  fun `computeHash returns correct CRC32 for known text and empty input`() {
+    val tempFile = Files.createTempFile("hasher-test-crc32", ".txt").toFile()
+    try {
+      tempFile.writeText("hello world")
+      val hash = hasher.computeHash(tempFile, "CRC32")
+      assertEquals("0d4a1185", hash)
+
+      val emptyStream = ByteArrayInputStream(ByteArray(0))
+      val emptyHash = hasher.computeHash(emptyStream, "CRC32")
+      assertEquals("00000000", emptyHash)
+    } finally {
+      tempFile.delete()
+    }
+  }
+
+  @Test
   fun `computeHash returns correct MD5 for known text`() {
     val tempFile = Files.createTempFile("hasher-test", ".txt").toFile()
     try {
@@ -225,13 +241,20 @@ class FileHasherTest {
       val fullHashB = hasher.computeHash(fileB, "XXH3", maxBytes = null)
       assertTrue(fullHashA != fullHashB)
 
-      // 5. Works identically with MD5
+      // 5. Works identically with MD5 and CRC32
       val md5A = hasher.computeHash(fileA, "MD5", maxBytes = limit)
       val md5B = hasher.computeHash(fileB, "MD5", maxBytes = limit)
       assertEquals(md5A, md5B)
 
       val md5C = hasher.computeHash(fileC, "MD5", maxBytes = limit)
       assertTrue(md5A != md5C)
+
+      val crcA = hasher.computeHash(fileA, "CRC32", maxBytes = limit)
+      val crcB = hasher.computeHash(fileB, "CRC32", maxBytes = limit)
+      assertEquals(crcA, crcB)
+
+      val crcC = hasher.computeHash(fileC, "CRC32", maxBytes = limit)
+      assertTrue(crcA != crcC)
     } finally {
       dir.toFile().deleteRecursively()
     }

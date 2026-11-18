@@ -102,7 +102,7 @@ fun parseByteSize(value: String?): Long? {
 
 /**
  * Standard implementation of [FileHasher] supporting high-performance non-cryptographic hashes
- * (such as XXH3, XXH3_128) as well as Java [MessageDigest] cryptographic algorithms (such as MD5, SHA-256).
+ * (such as XXH3, XXH3_128, CRC32, CRC32C) as well as Java [MessageDigest] cryptographic algorithms (such as MD5, SHA-256).
  *
  * @property bufferSize The buffer size in bytes used when reading stream chunks (default 1MB).
  */
@@ -179,6 +179,28 @@ open class MessageDigestFileHasher(
           stream.putLong(fileSize)
         }
         HashValues.toHexString(stream.asInt)
+      }
+      "CRC32" -> {
+        val crc = java.util.zip.CRC32()
+        readStream(inputStream, maxBytes) { buffer, bytesRead ->
+          crc.update(buffer, 0, bytesRead)
+        }
+        if (maxBytes != null && fileSize != null) {
+          val sizeBytes = ByteBuffer.allocate(java.lang.Long.BYTES).putLong(fileSize).array()
+          crc.update(sizeBytes)
+        }
+        "%08x".format(crc.value)
+      }
+      "CRC32C" -> {
+        val crc = java.util.zip.CRC32C()
+        readStream(inputStream, maxBytes) { buffer, bytesRead ->
+          crc.update(buffer, 0, bytesRead)
+        }
+        if (maxBytes != null && fileSize != null) {
+          val sizeBytes = ByteBuffer.allocate(java.lang.Long.BYTES).putLong(fileSize).array()
+          crc.update(sizeBytes)
+        }
+        "%08x".format(crc.value)
       }
       else -> {
         val messageDigest = MessageDigest.getInstance(algorithm)

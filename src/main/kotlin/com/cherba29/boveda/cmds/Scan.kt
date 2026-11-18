@@ -69,7 +69,7 @@ class ScanCommand(
   val algorithm: String by option(
     "-a",
     "--algorithm",
-    help = "File hashing algorithm (e.g. XXH3, MD5, SHA-256, SHA-512). Default is XXH3."
+    help = "File hashing algorithm (e.g. XXH3, CRC32, MD5, SHA-256, SHA-512). Default is XXH3."
   ).default("XXH3")
 
   val maxHashBytesOption: String? by option(

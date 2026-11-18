@@ -89,7 +89,7 @@ Usage: boveda scan [<options>] [<directory>] [<database>]
 Options:
   -c, --continue=<int>    Resume an incomplete directory scan for the given snapshot ID.
   -d, --db=<path>         Target database file path.
-  -a, --algorithm=<text>  File hashing algorithm (e.g. XXH3, MD5, SHA-256, SHA-512). Default is XXH3.
+  -a, --algorithm=<text>  File hashing algorithm (e.g. XXH3, CRC32, MD5, SHA-256, SHA-512). Default is XXH3.
   -m, --max-hash-bytes=<size>
                           Maximum initial bytes to hash per file as well as file size (e.g. 64Kb, 128Kb, 256Kb, 512Kb, 1Mb, full). Default is full file.
   -q, --quiet             Suppress per-file progress output during directory scan.
@@ -107,6 +107,22 @@ Arguments:
   <directory>  Directory path to scan (optional when --continue is provided).
   <database>   Target database file path.
 ```
+
+#### Best Scan Options & Hashing Strategy Guide
+
+For the full empirical benchmark report across large files (100 MB – 1 GB) and prefix limits, see [hashing_benchmark_report.md](hashing_benchmark_report.md).
+
+| Requirement / Circumstance | Recommended Scan Options | Rationale |
+| :--- | :--- | :--- |
+| **General Deduplication (Default)** | `boveda scan <dir> <db>` *(defaults to `--algorithm XXH3`)* | **2.7–3.0 GB/s** hashing rate on NVMe; 64-bit entropy protects against accidental collisions. Safe for deduplication reports. |
+| **Terabyte-Scale Storage / Large Media & ISOs** | `boveda scan --max-hash-bytes 1Mb <dir> <db>` | **~500x speedup** on large files (1 GB hashed in **0.69 ms**). Combines the first 1 MB prefix with the exact file size to eliminate disk read bottlenecks. |
+| **Safe Deletion Workflows (`db file delete`)** | `boveda scan --algorithm XXH3 <dir> <db>` *(Full hashing, omit `--max-hash-bytes`)* | Full content hashing ensures distinct files sharing identical headers or sizes are never falsely matched. **Never use CRC32 for deletion.** |
+| **Cloud / Amazon S3 / Legacy Manifests** | `boveda scan --algorithm MD5 <dir> <db>` | Generates 128-bit MD5 hex digests matching Amazon S3 ETags, `rsync --checksum`, and `md5sum` registries. |
+| **Low-Power / Battery-Constrained Devices** | `boveda scan --max-hash-bytes 64Kb <dir> <db>` *(or `--algorithm CRC32`)* | Minimizes storage I/O and CPU compute cycles, preserving battery and preventing thermal throttling on NAS/Raspberry Pi. |
+
+> [!WARNING]
+> **Why CRC32 must NEVER be used for deletion workflows:**
+> `CRC32` produces only a 32-bit checksum. Under the Birthday paradox, there is a **50% probability of an accidental hash collision at just ~77,000 files**. In a repository with 100k+ files, CRC32 will falsely flag distinct files as duplicates. If `db file delete` is executed on a CRC32 database, distinct user files could be permanently deleted! Always use `XXH3` (or `SHA-256`/`MD5`) for deduplication and deletion workflows.
 
 ### 2. `db` Subcommand
 
@@ -128,6 +144,7 @@ Arguments:
   <database>  Path to persistent H2 database file.
 
 Commands:
+  file              Manage files in the database (delete duplicates).
   print-duplicates  Query the provided database for the latest snapshot and print duplicate files and statistics.
   snapshots         Manage database snapshots (list, delete).
 ```
@@ -143,6 +160,7 @@ Usage: boveda db print-duplicates [<options>] [<database>]
   Query the provided database for the latest snapshot and print duplicate files and statistics.
 
 Options:
+  -v, --verbose         Print every duplicate file entry found in the database.
   -d, --db=<path>       Path to persistent H2 database file.
   -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest snapshot.
   -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
@@ -194,6 +212,33 @@ Arguments:
   <database>     Path to persistent H2 database file.
 ```
 
+### 6. `db file delete` Subcommand
+
+Deletes duplicate files from both disk and the database snapshot, automatically cleaning up orphaned CAS records when all references to a file's content are removed:
+
+* **Single-File Mode**: If a file path is specified, deletes it from disk and database, but only if duplicate copies exist (or if `--force` is specified).
+* **Interactive Mode**: If no file path is specified, finds the duplicate group wasting the most storage and provides an interactive terminal multi-select prompt (<kbd>↑</kbd>/<kbd>↓</kbd> navigate, <kbd>Space</kbd>/<kbd>x</kbd> toggle, <kbd>a</kbd> toggle all, <kbd>Enter</kbd> delete selected, <kbd>Esc</kbd> quit), looping to find the next largest group until resolved or exited.
+
+```text
+Usage: boveda db file delete [<options>] [<file>] [<database>]
+# or: boveda db [<database>] file delete [<file>] [<options>]
+
+  Delete duplicate files from disk and the database snapshot.
+
+Options:
+  -f, --file=<path>     Path of the file to delete from disk and database.
+  -d, --db=<path>       Path to persistent H2 database file.
+  --force               Force deletion of file even if it has no duplicates.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest snapshot.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                        Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help            Show this message and exit
+
+Arguments:
+  <file>      Optional path of the file to delete. If omitted, starts interactive duplicate selector.
+  <database>  Path to persistent H2 database file.
+```
+
 ---
 
 ## Examples
@@ -228,20 +273,17 @@ Query the latest snapshot in `/tmp/vault.db` without re-scanning the filesystem:
 ### 4. Query Duplicate Files & Duplication Statistics Report
 Analyze the latest snapshot in `/tmp/vault.db` for duplicate files and storage waste:
 ```bash
+# Default: prints top 10 duplicate groups and summary deciles table
 ./gradlew run --args="db print-duplicates /tmp/vault.db"
 # or equivalently:
 ./gradlew run --args="db /tmp/vault.db print-duplicates"
+
+# Verbose: also print every individual duplicate file entry in the database
+./gradlew run --args="db print-duplicates --verbose /tmp/vault.db"
 ```
 
 Example report output:
 ```text
-### ==== Duplicate Files in DB ==== ###
-snapshot=1 size=26633830 path=/data/backup/video1.mp4 rank=1 hash=4f1a...
-snapshot=1 size=26633830 path=/data/media/video1.mp4 rank=2 hash=4f1a...
-snapshot=1 size=12687769 path=/data/docs/archive.tar rank=1 hash=a82c...
-snapshot=1 size=12687769 path=/data/old/archive.tar rank=2 hash=a82c...
-snapshot=1 size=12687769 path=/data/tmp/archive.tar rank=3 hash=a82c...
-
 ================================================================================
                            DUPLICATION SUMMARY
 ================================================================================
@@ -299,13 +341,33 @@ Total Wasted Storage: 89.06 MB (93,382,389 bytes)
 ================================================================================
 ```
 
-### 5. Use SHA-256 Hashing Algorithm
-Specify a cryptographic algorithm such as `SHA-256` or `SHA-512`:
+### 5. Hashing Algorithms (XXH3, CRC32, MD5, SHA-256)
+Specify a non-cryptographic or cryptographic hashing algorithm:
 ```bash
+# High-performance default non-cryptographic hash (2.7–3.0 GB/s on NVMe)
+./gradlew run --args="scan --algorithm XXH3 /path/to/my/documents /tmp/vault.db"
+
+# Amazon S3 ETag compatible MD5 digest (630 MB/s)
+./gradlew run --args="scan --algorithm MD5 /path/to/my/documents /tmp/vault.db"
+
+# Hardware-accelerated CRC32 for low-power devices (4.0 GB/s)
+./gradlew run --args="scan --algorithm CRC32 /path/to/my/documents /tmp/vault.db"
+
+# Cryptographic SHA-256
 ./gradlew run --args="scan --algorithm SHA-256 /path/to/my/documents /tmp/vault.db"
 ```
 
-### 6. Multi-Threaded Parallel & Work-Stealing Traversal
+### 6. Fast Prefix Hashing on Large Files (`--max-hash-bytes`)
+Accelerate scanning of large media, video libraries, and archives by hashing only an initial prefix combined with the exact file size (up to 500x speedup):
+```bash
+# Hash only the first 1 MB per file (combines 1 MB prefix + total file size)
+./gradlew run --args="scan --max-hash-bytes 1Mb /path/to/my/videos /tmp/vault.db"
+
+# Ultra-fast 64 KB prefix scan for network shares (NAS)
+./gradlew run --args="scan --max-hash-bytes 64Kb /mnt/nas/media /tmp/vault.db"
+```
+
+### 7. Multi-Threaded Parallel & Work-Stealing Traversal
 Configure worker thread pools and directory exploration strategy:
 ```bash
 # Work-stealing ForkJoinPool scanner with 8 threads (default)
@@ -318,7 +380,7 @@ Configure worker thread pools and directory exploration strategy:
 ./gradlew run --args="scan --scanner sequential /path/to/my/documents /tmp/vault.db"
 ```
 
-### 7. High-Throughput Batch Ingestion & Cache Tuning
+### 8. High-Throughput Batch Ingestion & Cache Tuning
 Tune database batch transaction sizes and cache warm-up:
 ```bash
 # Ingest in batches of 2,000 files
@@ -328,20 +390,20 @@ Tune database batch transaction sizes and cache warm-up:
 ./gradlew run --args="scan --no-cache-warmup /path/to/my/documents /tmp/vault.db"
 ```
 
-### 8. Query a Specific Snapshot by ID
+### 9. Query a Specific Snapshot by ID
 Query a historical snapshot rather than the default latest snapshot:
 ```bash
 ./gradlew run --args="db --snapshot 2 /tmp/vault.db"
 ./gradlew run --args="db print-duplicates --snapshot 2 /tmp/vault.db"
 ```
 
-### 9. Enable Debug SQL Query Logging
+### 10. Enable Debug SQL Query Logging
 Direct SQL query execution logs to stderr by setting `--log-level=DEBUG`:
 ```bash
 ./gradlew run --args="-l DEBUG scan /path/to/my/documents /tmp/vault.db"
 ```
 
-### 10. List Existing Database Snapshots
+### 11. List Existing Database Snapshots
 List all recorded snapshots with root directory path, total file counts, storage size, and completion status:
 ```bash
 ./gradlew run --args="db snapshots list /tmp/vault.db"
@@ -359,7 +421,7 @@ Example output:
 └────┴──────────────┴─────────┴────────────┴───────────┘
 ```
 
-### 11. Delete a Snapshot by Snapshot ID
+### 12. Delete a Snapshot by Snapshot ID
 Delete a specific snapshot by its ID, cleaning up its file instances and any orphaned files:
 ```bash
 ./gradlew run --args="db snapshots delete 1 /tmp/vault.db"
@@ -370,6 +432,19 @@ Delete a specific snapshot by its ID, cleaning up its file instances and any orp
 Example output:
 ```text
 Snapshot 1 deleted successfully.
+```
+
+### 13. Delete Duplicate Files from Disk and Database (`db file delete`)
+Delete a specific duplicate file or use the interactive terminal prompt to reclaim space from the largest duplicate groups:
+```bash
+# Delete a specific duplicate file (fails if it has no duplicates, unless --force is given)
+./gradlew run --args="db file delete /data/backup/video1.mp4 /tmp/vault.db"
+
+# Force deletion of any file regardless of duplicate status
+./gradlew run --args="db file delete --force /data/backup/old.log /tmp/vault.db"
+
+# Interactive deletion: prompts to select and delete duplicates from the group wasting the most space
+./gradlew run --args="db file delete /tmp/vault.db"
 ```
 
 ---
