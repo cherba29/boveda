@@ -582,4 +582,105 @@ class DeleteTest {
     val selected = selector.selectDuplicates(group)
     assertNull(selected)
   }
+
+  @Test
+  fun `InteractiveDuplicateSelector s key skips selection returning empty list`() {
+    val recorder = TerminalRecorder(inputInteractive = true)
+    recorder.inputEvents.addAll(
+      listOf(
+        KeyboardEvent("ArrowDown"),
+        KeyboardEvent(" "),
+        KeyboardEvent("s")
+      )
+    )
+
+    val terminal = Terminal(terminalInterface = recorder)
+    val selector = InteractiveDuplicateSelector(terminal)
+    val group = DuplicateGroup(
+      hash = "hash123",
+      size = 1000L,
+      copyCount = 2,
+      paths = listOf("/path/a", "/path/b")
+    )
+
+    val selected = selector.selectDuplicates(group)
+    assertEquals(emptyList(), selected)
+  }
+
+  @Test
+  fun `InteractiveDuplicateSelector fallback line prompt skips on s or skip input`() {
+    val recorder1 = TerminalRecorder(inputInteractive = false)
+    recorder1.inputLines.add("s")
+    val selector1 = InteractiveDuplicateSelector(Terminal(terminalInterface = recorder1))
+    val group = DuplicateGroup(
+      hash = "hash123",
+      size = 500L,
+      copyCount = 2,
+      paths = listOf("/path/1", "/path/2")
+    )
+    assertEquals(emptyList(), selector1.selectDuplicates(group))
+
+    val recorder2 = TerminalRecorder(inputInteractive = false)
+    recorder2.inputLines.add("skip")
+    val selector2 = InteractiveDuplicateSelector(Terminal(terminalInterface = recorder2))
+    assertEquals(emptyList(), selector2.selectDuplicates(group))
+  }
+
+  @Test
+  fun `file delete interactive mode skips group when s key is pressed and moves to next largest duplicate group`() {
+    val tempDir = Files.createTempDirectory("file-del-skip-s-dir")
+    val dbDir = Files.createTempDirectory("file-del-skip-s-db")
+    try {
+      val a1 = tempDir.resolve("a1.txt").apply { writeText("a".repeat(200)) }
+      val a2 = tempDir.resolve("a2.txt").apply { writeText("a".repeat(200)) }
+
+      val b1 = tempDir.resolve("b1.txt").apply { writeText("b".repeat(100)) }
+      val b2 = tempDir.resolve("b2.txt").apply { writeText("b".repeat(100)) }
+
+      val dbFile = dbDir.resolve("skip_s_db")
+
+      val scanCmd = ScanCommand()
+      assertEquals(
+        0,
+        scanCmd.test(listOf("--quiet", tempDir.toString(), dbFile.toString())).statusCode
+      )
+
+      val recorder = TerminalRecorder(inputInteractive = true)
+      // Group A (200 bytes): user presses 's' to skip
+      recorder.inputEvents.add(KeyboardEvent("s"))
+      // Group B (100 bytes): user selects item 2 (b2) and presses Enter
+      recorder.inputEvents.addAll(
+        listOf(
+          KeyboardEvent("ArrowDown"),
+          KeyboardEvent(" "),
+          KeyboardEvent("Enter")
+        )
+      )
+      // Next prompt: user presses Escape
+      recorder.inputEvents.add(KeyboardEvent("Escape"))
+
+      val terminal = Terminal(terminalInterface = recorder)
+      val selector = InteractiveDuplicateSelector(terminal)
+      val deleteCmd = DeleteCommand(selector = { selector.selectDuplicates(it) })
+      val result = deleteCmd.test(listOf("--db", dbFile.toString()))
+
+      assertEquals(0, result.statusCode)
+      assertTrue(
+        result.output.contains("No files selected to delete. Skipping this duplicate group.")
+      )
+      assertTrue(result.output.contains("Deleted 1 duplicate file(s):"))
+      assertTrue(result.output.contains("b2.txt"))
+
+      // a1 and a2 were skipped and still exist
+      assertTrue(a1.exists())
+      assertTrue(a2.exists())
+
+      // b2 was deleted; b1 remains
+      assertFalse(b2.exists())
+      assertTrue(b1.exists())
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
 }

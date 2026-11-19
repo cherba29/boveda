@@ -75,7 +75,7 @@ class InteractiveDuplicateSelector(
           appendLine("$cursorPrefix$check $styledPath")
         }
         val instructions = "  (↑/↓: navigate, Space/x: toggle, a: all, " +
-          "Enter: delete, Esc: quit)"
+          "s: skip, Enter: delete, Esc: quit)"
         append(dim(instructions))
       }
     }
@@ -111,6 +111,11 @@ class InteractiveDuplicateSelector(
             selected.fill(!allSelected)
             anim.update(Unit)
           }
+          event.key.equals("s", ignoreCase = true) ||
+            event.key.equals("skip", ignoreCase = true) -> {
+            anim.clear()
+            return emptyList()
+          }
           event.key == "Enter" || event.key == "\n" || event.key == "\r" -> {
             anim.clear()
             return items.filterIndexed { index, _ -> selected[index] }
@@ -133,7 +138,9 @@ class InteractiveDuplicateSelector(
     items.forEachIndexed { index, path ->
       terminal.println("  ${index + 1}. $path")
     }
-    terminal.print("Enter numbers to delete (e.g. 1, 2), 'all', or 'esc'/'q' to quit: ")
+    terminal.print(
+      "Enter numbers to delete (e.g. 1, 2), 'all', 's'/'skip' to skip, or 'esc'/'q' to quit: "
+    )
     val line = terminal.readLineOrNull(hideInput = false)?.trim() ?: return null
     if (line.equals("esc", ignoreCase = true) ||
       line.equals("q", ignoreCase = true) ||
@@ -144,7 +151,10 @@ class InteractiveDuplicateSelector(
     if (line.equals("all", ignoreCase = true)) {
       return items
     }
-    if (line.isEmpty()) {
+    if (line.isEmpty() ||
+      line.equals("s", ignoreCase = true) ||
+      line.equals("skip", ignoreCase = true)
+    ) {
       return emptyList()
     }
     val parts = line.split(",", " ").map { it.trim() }.filter { it.isNotEmpty() }
