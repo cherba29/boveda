@@ -53,6 +53,11 @@ class EntitiesTest {
         rootPath = "/vault"
       }
 
+      val folder = RepoFolder.new {
+        this.snapshot = snapshot
+        this.path = "/vault"
+      }
+
       val file = RepoFile.new {
         size = 1024L
         hash = "abcdef123456"
@@ -60,23 +65,29 @@ class EntitiesTest {
 
       val instance1 = RepoFileInstance.new {
         this.snapshot = snapshot
+        this.folder = folder
         this.file = file
         this.path = "doc1.txt"
       }
 
       val instance2 = RepoFileInstance.new {
         this.snapshot = snapshot
+        this.folder = folder
         this.file = file
         this.path = "copy/doc1.txt"
       }
 
       assertEquals(snapshot.id, instance1.snapshot.id)
+      assertEquals(folder.id, instance1.folder.id)
       assertEquals(file.id, instance1.file.id)
       assertEquals("doc1.txt", instance1.path)
 
       // Test navigation from parent entities
       val snapshotInstances = snapshot.instances.toList()
       assertEquals(2, snapshotInstances.size)
+
+      val folderInstances = folder.instances.toList()
+      assertEquals(2, folderInstances.size)
 
       val fileInstances = file.instances.toList()
       assertEquals(2, fileInstances.size)

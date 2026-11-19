@@ -12,6 +12,7 @@ class RepoSnapshot(id: EntityID<Int>) : IntEntity(id) {
 
   var rootPath by RepoSnapshots.rootPath
   var isCompleted by RepoSnapshots.isCompleted
+  val folders by RepoFolder referrersOn RepoFolders.snapshot
   val instances by RepoFileInstance referrersOn RepoFileInstances.snapshot
 }
 
@@ -19,6 +20,19 @@ class RepoSnapshot(id: EntityID<Int>) : IntEntity(id) {
  * Typealias for backward compatibility with existing code referring to [ReportSnapshot].
  */
 typealias ReportSnapshot = RepoSnapshot
+
+/**
+ * Exposed DAO entity representing a folder record within a snapshot.
+ */
+class RepoFolder(id: EntityID<Int>) : IntEntity(id) {
+  companion object : IntEntityClass<RepoFolder>(RepoFolders)
+
+  var snapshot by RepoSnapshot referencedOn RepoFolders.snapshot
+  var path by RepoFolders.path
+  var fileCount by RepoFolders.fileCount
+  var totalBytes by RepoFolders.totalBytes
+  val instances by RepoFileInstance referrersOn RepoFileInstances.folder
+}
 
 /**
  * Exposed DAO entity representing a file content record.
@@ -38,6 +52,7 @@ class RepoFileInstance(id: EntityID<Int>) : IntEntity(id) {
   companion object : IntEntityClass<RepoFileInstance>(RepoFileInstances)
 
   var snapshot by RepoSnapshot referencedOn RepoFileInstances.snapshot
+  var folder by RepoFolder referencedOn RepoFileInstances.folder
   var file by RepoFile referencedOn RepoFileInstances.file
   var path by RepoFileInstances.path
   var timestamp by RepoFileInstances.timestamp

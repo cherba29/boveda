@@ -39,7 +39,7 @@ object DatabaseFactory {
    */
   fun initSchema(database: Database) {
     transaction(database) {
-      SchemaUtils.create(RepoSnapshots, RepoFiles, RepoFileInstances)
+      SchemaUtils.create(RepoSnapshots, RepoFolders, RepoFiles, RepoFileInstances)
     }
   }
 }

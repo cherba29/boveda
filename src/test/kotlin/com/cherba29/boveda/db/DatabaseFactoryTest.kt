@@ -16,6 +16,7 @@ class DatabaseFactoryTest {
 
     transaction(db) {
       assertTrue(RepoSnapshots.exists())
+      assertTrue(RepoFolders.exists())
       assertTrue(RepoFiles.exists())
       assertTrue(RepoFileInstances.exists())
     }
@@ -30,6 +31,7 @@ class DatabaseFactoryTest {
 
       transaction(db) {
         assertTrue(RepoSnapshots.exists())
+        assertTrue(RepoFolders.exists())
         assertTrue(RepoFiles.exists())
         assertTrue(RepoFileInstances.exists())
       }
@@ -48,6 +50,7 @@ class DatabaseFactoryTest {
 
     transaction(db) {
       assertTrue(RepoSnapshots.exists())
+      assertTrue(RepoFolders.exists())
       assertTrue(RepoFiles.exists())
       assertTrue(RepoFileInstances.exists())
     }

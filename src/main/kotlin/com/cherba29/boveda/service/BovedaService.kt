@@ -7,6 +7,8 @@ import com.cherba29.boveda.db.RepoFile
 import com.cherba29.boveda.db.RepoFileInstance
 import com.cherba29.boveda.db.RepoFileInstances
 import com.cherba29.boveda.db.RepoFiles
+import com.cherba29.boveda.db.RepoFolder
+import com.cherba29.boveda.db.RepoFolders
 import com.cherba29.boveda.db.RepoSnapshot
 import com.cherba29.boveda.db.RepoSnapshots
 import com.cherba29.boveda.model.DuplicateFileEntry
@@ -31,7 +33,9 @@ import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.terminal.Terminal
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.Connection
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.time.Duration
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -48,6 +52,7 @@ import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 /**
@@ -71,6 +76,49 @@ class BovedaService(
 
   companion object {
     const val DEFAULT_BATCH_SIZE = 1000
+  }
+
+  private val folderCache = ConcurrentHashMap<Pair<Int, String>, EntityID<Int>>()
+
+  /**
+   * Resolves the parent folder path of [path] in normalized invariant-separator format.
+   */
+  fun getParentFolderPath(path: Path): String =
+    path.parent?.normalize()?.invariantSeparatorsPathString ?: "/"
+
+  private fun ensureFoldersExist(snapshotId: EntityID<Int>, folderPaths: Collection<String>) {
+    val missing = folderPaths.filter { !folderCache.containsKey(Pair(snapshotId.value, it)) }
+    if (missing.isEmpty()) return
+
+    for (chunk in missing.chunked(500)) {
+      RepoFolders.select(RepoFolders.id, RepoFolders.path)
+        .where { (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path inList chunk) }
+        .forEach { row ->
+          folderCache[Pair(snapshotId.value, row[RepoFolders.path])] = row[RepoFolders.id]
+        }
+    }
+
+    val stillMissing = missing.filter { !folderCache.containsKey(Pair(snapshotId.value, it)) }
+    if (stillMissing.isNotEmpty()) {
+      val inserted = RepoFolders.batchInsert(
+        stillMissing,
+        shouldReturnGeneratedValues = true
+      ) { p ->
+        this[RepoFolders.snapshot] = snapshotId
+        this[RepoFolders.path] = p
+        this[RepoFolders.fileCount] = 0
+        this[RepoFolders.totalBytes] = 0L
+      }
+      for ((p, row) in stillMissing.zip(inserted)) {
+        folderCache[Pair(snapshotId.value, p)] = row[RepoFolders.id]
+      }
+    }
+  }
+
+  private fun getOrCreateFolderId(snapshotId: EntityID<Int>, folderPath: String): EntityID<Int> {
+    ensureFoldersExist(snapshotId, listOf(folderPath))
+    return folderCache[Pair(snapshotId.value, folderPath)]
+      ?: error("Failed to resolve folder id for $folderPath")
   }
 
   /**
@@ -110,8 +158,12 @@ class BovedaService(
         }
       }
 
+      val folderPath = getParentFolderPath(scannedFile.path)
+      val folderId = getOrCreateFolderId(snapshot.id, folderPath)
+
       RepoFileInstance.new {
         this.snapshot = snapshot
+        this.folder = RepoFolder[folderId]
         this.file = repoFile
         this.path = scannedFile.path.invariantSeparatorsPathString
         this.timestamp = scannedFile.lastModifiedTime?.toMillis()
@@ -140,6 +192,9 @@ class BovedaService(
         }
       }
 
+      val folderPathsInBatch = batch.map { getParentFolderPath(it.path) }.distinct()
+      ensureFoldersExist(snapshot.id, folderPathsInBatch)
+
       if (!deduplicateFiles) {
         val insertedFiles = RepoFiles.batchInsert(
           batch,
@@ -153,7 +208,11 @@ class BovedaService(
           instances,
           shouldReturnGeneratedValues = false
         ) { (file, fileRow) ->
+          val folderPath = getParentFolderPath(file.path)
+          val folderId = folderCache[Pair(snapshot.id.value, folderPath)]
+            ?: error("Folder $folderPath must be cached")
           this[RepoFileInstances.snapshot] = snapshot.id
+          this[RepoFileInstances.folder] = folderId
           this[RepoFileInstances.file] = fileRow[RepoFiles.id]
           this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
           this[RepoFileInstances.timestamp] = file.lastModifiedTime?.toMillis()
@@ -204,7 +263,11 @@ class BovedaService(
       RepoFileInstances.batchInsert(batch, shouldReturnGeneratedValues = false) { file ->
         val entityId = cache.peek(file.size, file.hash)
           ?: error("Cache must contain file id for hash ${file.hash} and size ${file.size}")
+        val folderPath = getParentFolderPath(file.path)
+        val folderId = folderCache[Pair(snapshot.id.value, folderPath)]
+          ?: error("Folder $folderPath must be cached")
         this[RepoFileInstances.snapshot] = snapshot.id
+        this[RepoFileInstances.folder] = folderId
         this[RepoFileInstances.file] = entityId
         this[RepoFileInstances.path] = file.path.invariantSeparatorsPathString
         this[RepoFileInstances.timestamp] = file.lastModifiedTime?.toMillis()
@@ -244,10 +307,37 @@ class BovedaService(
   ) = recordFiles(snapshot, files.asSequence(), existingEntriesToUpdate)
 
   /**
-   * Marks [snapshot] as completed.
+   * Marks [snapshot] as completed and updates aggregate folder statistics.
    */
   fun completeSnapshot(snapshot: RepoSnapshot) = transaction(database) {
+    updateFolderStatistics(snapshot.id.value)
     snapshot.isCompleted = true
+  }
+
+  /**
+   * Updates [RepoFolders.fileCount] and [RepoFolders.totalBytes] for all folders under [snapshotId].
+   */
+  fun updateFolderStatistics(snapshotId: Int) = transaction(database) {
+    val conn = (TransactionManager.current().connection.connection as Connection)
+    val sql = """
+      MERGE INTO folders f
+      USING (
+        SELECT folder_id, COUNT(*) AS cnt, SUM("size") AS bytes
+        FROM (
+          SELECT DISTINCT fi.folder_id, fi.file_id, fl."size"
+          FROM file_instances fi
+          JOIN files fl ON fi.file_id = fl.id
+          WHERE fi.snapshot_id = ?
+        )
+        GROUP BY folder_id
+      ) agg
+      ON (f.id = agg.folder_id)
+      WHEN MATCHED THEN UPDATE SET f.file_count = agg.cnt, f.total_bytes = agg.bytes
+    """.trimIndent()
+    conn.prepareStatement(sql).use { stmt ->
+      stmt.setInt(1, snapshotId)
+      stmt.executeUpdate()
+    }
   }
 
   /**
@@ -308,10 +398,12 @@ class BovedaService(
   fun deleteSnapshot(snapshotId: Int): Boolean = transaction(database) {
     val snapshot = RepoSnapshot.findById(snapshotId) ?: return@transaction false
     RepoFileInstances.deleteWhere { RepoFileInstances.snapshot eq snapshot.id }
+    RepoFolders.deleteWhere { RepoFolders.snapshot eq snapshot.id }
     RepoFiles.deleteWhere {
       RepoFiles.id notInSubQuery (RepoFileInstances.select(RepoFileInstances.file))
     }
     snapshot.delete()
+    folderCache.keys.removeIf { it.first == snapshotId }
     true
   }
 
@@ -1061,72 +1153,136 @@ class BovedaService(
    */
   fun findTopDuplicateFolderPairs(snapshotId: Int, limit: Int = 10): List<FolderDuplicatePair> =
     transaction(database) {
-      val instances = (RepoFileInstances innerJoin RepoFiles)
-        .select(
-          RepoFileInstances.path,
-          RepoFiles.size,
-          RepoFiles.hash
+      val snapshot = RepoSnapshot.findById(snapshotId) ?: return@transaction emptyList()
+      if (!snapshot.isCompleted) {
+        updateFolderStatistics(snapshotId)
+      }
+
+      data class CandidatePair(
+        val f1Id: Int,
+        val f2Id: Int,
+        val sameFiles: Long,
+        val duplicatedStorage: Long
+      )
+
+      val candidateLimit = maxOf(limit * 3, 50)
+      val candidates = mutableListOf<CandidatePair>()
+
+      val candidateSql = """
+        WITH file_folder_counts AS (
+          SELECT file_id, COUNT(DISTINCT folder_id) AS folder_count
+          FROM file_instances
+          WHERE snapshot_id = $snapshotId
+          GROUP BY file_id
+          HAVING COUNT(DISTINCT folder_id) > 1
+        ),
+        folder_files AS (
+          SELECT DISTINCT fi.folder_id, fi.file_id, fl."size"
+          FROM file_instances fi
+          JOIN files fl ON fi.file_id = fl.id
+          JOIN file_folder_counts ffc ON fi.file_id = ffc.file_id
+          WHERE fi.snapshot_id = $snapshotId
+            AND (fl."size" > 0 OR ffc.folder_count <= 100)
+            AND ffc.folder_count <= 500
         )
-        .where { RepoFileInstances.snapshot eq snapshotId }
-        .toList()
+        SELECT
+          ff1.folder_id AS f1_id,
+          ff2.folder_id AS f2_id,
+          COUNT(*) AS same_files,
+          SUM(ff1."size") AS duplicated_storage
+        FROM folder_files ff1
+        JOIN folder_files ff2
+          ON ff1.file_id = ff2.file_id
+         AND ff1.folder_id < ff2.folder_id
+        GROUP BY ff1.folder_id, ff2.folder_id
+        ORDER BY same_files DESC, duplicated_storage DESC
+        LIMIT $candidateLimit
+      """.trimIndent()
 
-      if (instances.isEmpty()) return@transaction emptyList()
-
-      data class FileRow(val path: String, val size: Long, val hash: String)
-      val folderMap = mutableMapOf<String, MutableList<FileRow>>()
-      val hashToSize = mutableMapOf<String, Long>()
-
-      for (row in instances) {
-        val pathStr = row[RepoFileInstances.path]
-        val size = row[RepoFiles.size]
-        val hash = row[RepoFiles.hash]
-        val folder = Path.of(pathStr).parent?.normalize()?.invariantSeparatorsPathString ?: "/"
-        folderMap.getOrPut(folder) { mutableListOf() }.add(FileRow(pathStr, size, hash))
-        hashToSize[hash] = size
-      }
-
-      val hashToFolders = mutableMapOf<String, MutableSet<String>>()
-      for ((folder, files) in folderMap) {
-        for (file in files) {
-          hashToFolders.getOrPut(file.hash) { mutableSetOf() }.add(folder)
+      val conn = (TransactionManager.current().connection.connection as Connection)
+      conn.prepareStatement(candidateSql).use { stmt ->
+        val rs = stmt.executeQuery()
+        while (rs.next()) {
+          candidates.add(
+            CandidatePair(
+              f1Id = rs.getInt("f1_id"),
+              f2Id = rs.getInt("f2_id"),
+              sameFiles = rs.getLong("same_files"),
+              duplicatedStorage = rs.getLong("duplicated_storage")
+            )
+          )
         }
       }
 
-      data class PairKey(val f1: String, val f2: String)
-      val candidatePairs = mutableSetOf<PairKey>()
-      for ((_, folders) in hashToFolders) {
-        if (folders.size > 1) {
-          val sorted = folders.toList().sorted()
-          for (i in 0 until sorted.size) {
-            for (j in (i + 1) until sorted.size) {
-              candidatePairs.add(PairKey(sorted[i], sorted[j]))
-            }
+      if (candidates.isEmpty()) return@transaction emptyList()
+
+      val candidateFolderIds = candidates.flatMap { listOf(it.f1Id, it.f2Id) }.distinct()
+      data class FolderMeta(val path: String, val fileCount: Long, val totalBytes: Long)
+      val folderMetaMap = RepoFolders.select(
+        RepoFolders.id,
+        RepoFolders.path,
+        RepoFolders.fileCount,
+        RepoFolders.totalBytes
+      ).where { RepoFolders.id inList candidateFolderIds.map { EntityID(it, RepoFolders) } }
+        .associate {
+          it[RepoFolders.id].value to FolderMeta(
+            path = it[RepoFolders.path],
+            fileCount = it[RepoFolders.fileCount].toLong(),
+            totalBytes = it[RepoFolders.totalBytes]
+          )
+        }
+
+      data class PairCandidateWrapper(
+        val actualF1Id: Int,
+        val actualF2Id: Int,
+        val folder1: String,
+        val folder2: String,
+        val sameFiles: Long,
+        val differentFiles: Long,
+        val totalFiles: Long,
+        val duplicatedStorage: Long,
+        val differentStorage: Long,
+        val totalStorage: Long,
+        val duplicateFilesPercentage: Double,
+        val duplicateStoragePercentage: Double
+      )
+
+      val evaluatedPairs = candidates.mapNotNull { candidate ->
+        val meta1 = folderMetaMap[candidate.f1Id] ?: return@mapNotNull null
+        val meta2 = folderMetaMap[candidate.f2Id] ?: return@mapNotNull null
+
+        val (folder1, folder2, f1Count, f2Count, f1Bytes, f2Bytes, actualF1Id, actualF2Id) =
+          if (meta1.path <= meta2.path) {
+            FolderPairOrder(
+              meta1.path,
+              meta2.path,
+              meta1.fileCount,
+              meta2.fileCount,
+              meta1.totalBytes,
+              meta2.totalBytes,
+              candidate.f1Id,
+              candidate.f2Id
+            )
+          } else {
+            FolderPairOrder(
+              meta2.path,
+              meta1.path,
+              meta2.fileCount,
+              meta1.fileCount,
+              meta2.totalBytes,
+              meta1.totalBytes,
+              candidate.f2Id,
+              candidate.f1Id
+            )
           }
-        }
-      }
 
-      if (candidatePairs.isEmpty()) return@transaction emptyList()
-
-      val folderHashes = folderMap.mapValues { (_, files) ->
-        files.map { it.hash }.toSet()
-      }
-
-      val pairs = candidatePairs.map { (f1, f2) ->
-        val files1 = folderMap[f1] ?: emptyList()
-        val files2 = folderMap[f2] ?: emptyList()
-        val hashes1 = folderHashes[f1] ?: emptySet()
-        val hashes2 = folderHashes[f2] ?: emptySet()
-
-        val sharedHashes = hashes1.intersect(hashes2)
-        val diff1 = hashes1 - sharedHashes
-        val diff2 = hashes2 - sharedHashes
-
-        val sameFiles = sharedHashes.size.toLong()
-        val differentFiles = (diff1.size + diff2.size).toLong()
+        val sameFiles = candidate.sameFiles
+        val differentFiles = maxOf(0L, (f1Count - sameFiles) + (f2Count - sameFiles))
         val totalFiles = sameFiles + differentFiles
 
-        val duplicatedStorage = sharedHashes.sumOf { hashToSize[it] ?: 0L }
-        val differentStorage = (diff1 + diff2).sumOf { hashToSize[it] ?: 0L }
+        val duplicatedStorage = candidate.duplicatedStorage
+        val differentStorage =
+          maxOf(0L, (f1Bytes - duplicatedStorage) + (f2Bytes - duplicatedStorage))
         val totalStorage = duplicatedStorage + differentStorage
 
         val duplicateFilesPercentage = if (totalFiles > 0L) {
@@ -1141,34 +1297,11 @@ class BovedaService(
           0.0
         }
 
-        val top3Hashes = sharedHashes.sortedWith(
-          compareByDescending<String> { hashToSize[it] ?: 0L }.thenBy { it }
-        ).take(3)
-
-        val topDuplicateFiles = top3Hashes.map { hash ->
-          val size = hashToSize[hash] ?: 0L
-          val pathsInF1 = files1.filter { it.hash == hash }.map { it.path }
-          val pathsInF2 = files2.filter { it.hash == hash }.map { it.path }
-          val p1 = pathsInF1.first()
-          val p2 = pathsInF2.first()
-          val name1 = Path.of(p1).fileName?.toString() ?: p1
-          val name2 = Path.of(p2).fileName?.toString() ?: p2
-          val displayName = if (name1 == name2) name1 else "$name1 / $name2"
-
-          DuplicateFileEntry(
-            fileName = displayName,
-            size = size,
-            hash = hash,
-            path1 = p1,
-            path2 = p2,
-            pathsInFolder1 = pathsInF1,
-            pathsInFolder2 = pathsInF2
-          )
-        }
-
-        FolderDuplicatePair(
-          folder1 = f1,
-          folder2 = f2,
+        PairCandidateWrapper(
+          actualF1Id = actualF1Id,
+          actualF2Id = actualF2Id,
+          folder1 = folder1,
+          folder2 = folder2,
           sameFiles = sameFiles,
           differentFiles = differentFiles,
           totalFiles = totalFiles,
@@ -1176,17 +1309,118 @@ class BovedaService(
           differentStorage = differentStorage,
           totalStorage = totalStorage,
           duplicateFilesPercentage = duplicateFilesPercentage,
-          duplicateStoragePercentage = duplicateStoragePercentage,
-          topDuplicateFiles = topDuplicateFiles
+          duplicateStoragePercentage = duplicateStoragePercentage
         )
       }
 
-      pairs.sortedWith(
-        compareByDescending<FolderDuplicatePair> { it.sameFiles }
+      val topPairs = evaluatedPairs.sortedWith(
+        compareByDescending<PairCandidateWrapper> { it.sameFiles }
           .thenByDescending { it.duplicatedStorage }
           .thenBy { it.folder1 }
           .thenBy { it.folder2 }
       ).take(limit)
+
+      topPairs.map { pair ->
+        val top3FilesSql = """
+          SELECT fl.id, fl."size", fl.hash
+          FROM file_instances fi1
+          JOIN file_instances fi2 ON fi1.file_id = fi2.file_id
+          JOIN files fl ON fi1.file_id = fl.id
+          WHERE fi1.snapshot_id = ?
+            AND fi1.folder_id = ?
+            AND fi2.snapshot_id = ?
+            AND fi2.folder_id = ?
+          GROUP BY fl.id, fl."size", fl.hash
+          ORDER BY fl."size" DESC, fl.hash ASC
+          LIMIT 3
+        """.trimIndent()
+
+        data class TopFile(val fileId: Int, val size: Long, val hash: String)
+        val topFiles = mutableListOf<TopFile>()
+        conn.prepareStatement(top3FilesSql).use { stmt ->
+          stmt.setInt(1, snapshotId)
+          stmt.setInt(2, pair.actualF1Id)
+          stmt.setInt(3, snapshotId)
+          stmt.setInt(4, pair.actualF2Id)
+          val rs = stmt.executeQuery()
+          while (rs.next()) {
+            topFiles.add(
+              TopFile(
+                fileId = rs.getInt("id"),
+                size = rs.getLong("size"),
+                hash = rs.getString("hash")
+              )
+            )
+          }
+        }
+
+        val topDuplicateFiles = if (topFiles.isEmpty()) {
+          emptyList()
+        } else {
+          val fileIds = topFiles.map { it.fileId }
+          val pathsInF1 = mutableMapOf<Int, MutableList<String>>()
+          val pathsInF2 = mutableMapOf<Int, MutableList<String>>()
+
+          RepoFileInstances.select(
+            RepoFileInstances.folder,
+            RepoFileInstances.file,
+            RepoFileInstances.path
+          ).where {
+            (RepoFileInstances.snapshot eq snapshotId) and
+              (
+                RepoFileInstances.folder inList listOf(
+                  EntityID(pair.actualF1Id, RepoFolders),
+                  EntityID(pair.actualF2Id, RepoFolders)
+                )
+                ) and
+              (RepoFileInstances.file inList fileIds.map { EntityID(it, RepoFiles) })
+          }.forEach { row ->
+            val folderId = row[RepoFileInstances.folder].value
+            val fileId = row[RepoFileInstances.file].value
+            val path = row[RepoFileInstances.path]
+            if (folderId == pair.actualF1Id) {
+              pathsInF1.getOrPut(fileId) { mutableListOf() }.add(path)
+            } else {
+              pathsInF2.getOrPut(fileId) { mutableListOf() }.add(path)
+            }
+          }
+
+          topFiles.mapNotNull { tf ->
+            val f1Paths = pathsInF1[tf.fileId] ?: emptyList()
+            val f2Paths = pathsInF2[tf.fileId] ?: emptyList()
+            if (f1Paths.isEmpty() || f2Paths.isEmpty()) return@mapNotNull null
+            val p1 = f1Paths.first()
+            val p2 = f2Paths.first()
+            val name1 = Path.of(p1).fileName?.toString() ?: p1
+            val name2 = Path.of(p2).fileName?.toString() ?: p2
+            val displayName = if (name1 == name2) name1 else "$name1 / $name2"
+
+            DuplicateFileEntry(
+              fileName = displayName,
+              size = tf.size,
+              hash = tf.hash,
+              path1 = p1,
+              path2 = p2,
+              pathsInFolder1 = f1Paths,
+              pathsInFolder2 = f2Paths
+            )
+          }
+        }
+
+        FolderDuplicatePair(
+          folder1 = pair.folder1,
+          folder2 = pair.folder2,
+          sameFiles = pair.sameFiles,
+          differentFiles = pair.differentFiles,
+          totalFiles = pair.totalFiles,
+          duplicatedStorage = pair.duplicatedStorage,
+          differentStorage = pair.differentStorage,
+          totalStorage = pair.totalStorage,
+          duplicateFilesPercentage = pair.duplicateFilesPercentage,
+          duplicateStoragePercentage = pair.duplicateStoragePercentage,
+          topDuplicateFiles = topDuplicateFiles
+        )
+      }
     }
 
   /**
@@ -1270,4 +1504,15 @@ data class SnapshotFileEntry(
   val timestamp: Long?,
   val hash: String,
   val fileId: EntityID<Int>
+)
+
+private data class FolderPairOrder(
+  val folder1: String,
+  val folder2: String,
+  val f1Count: Long,
+  val f2Count: Long,
+  val f1Bytes: Long,
+  val f2Bytes: Long,
+  val actualF1Id: Int,
+  val actualF2Id: Int
 )

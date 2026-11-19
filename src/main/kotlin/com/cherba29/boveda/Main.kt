@@ -13,9 +13,11 @@ import com.github.ajalt.clikt.core.main
 
 // Re-export core database declarations in com.cherba29.boveda for backward compatibility
 typealias RepoSnapshots = com.cherba29.boveda.db.RepoSnapshots
+typealias RepoFolders = com.cherba29.boveda.db.RepoFolders
 typealias RepoFiles = com.cherba29.boveda.db.RepoFiles
 typealias RepoFileInstances = com.cherba29.boveda.db.RepoFileInstances
 typealias ReportSnapshot = com.cherba29.boveda.db.ReportSnapshot
+typealias RepoFolder = com.cherba29.boveda.db.RepoFolder
 typealias RepoFile = com.cherba29.boveda.db.RepoFile
 typealias RepoFileInstance = com.cherba29.boveda.db.RepoFileInstance
 typealias DuplicateStatistics = com.cherba29.boveda.model.DuplicateStatistics

@@ -79,6 +79,7 @@ class ExposedReflectionMetadataTest {
       AutoIncColumnType(IntegerColumnType(), null, "seq"),
       AutoIncColumnType(LongColumnType(), null, "seq"),
       EntityIDColumnType(RepoSnapshots.id),
+      EntityIDColumnType(RepoFolders.id),
       EntityIDColumnType(RepoFiles.id),
       EntityIDColumnType(RepoFileInstances.id)
     )
@@ -94,7 +95,7 @@ class ExposedReflectionMetadataTest {
     ct.nullable = n
 
     // All table columns
-    for (table in listOf(RepoSnapshots, RepoFiles, RepoFileInstances)) {
+    for (table in listOf(RepoSnapshots, RepoFolders, RepoFiles, RepoFileInstances)) {
       for (col in table.columns) {
         exerciseReflection(col.columnType)
       }
