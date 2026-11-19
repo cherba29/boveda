@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.cmds.db.FileCommand
+import com.cherba29.boveda.cmds.db.FolderCommand
 import com.cherba29.boveda.cmds.db.PrintDuplicatesCommand
 import com.cherba29.boveda.cmds.db.SnapshotsCommand
 import com.cherba29.boveda.logging.LoggingConfig
@@ -68,7 +69,8 @@ class DbCommand(
     subcommands(
       PrintDuplicatesCommand(serviceFactory),
       SnapshotsCommand(serviceFactory),
-      FileCommand(serviceFactory, selector)
+      FileCommand(serviceFactory, selector),
+      FolderCommand(serviceFactory)
     )
   }
 

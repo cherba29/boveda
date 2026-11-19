@@ -44,6 +44,10 @@ typealias ListCommand = com.cherba29.boveda.cmds.db.snapshots.ListCommand
 typealias ListSnapshotsCommand = com.cherba29.boveda.cmds.db.snapshots.ListSnapshotsCommand
 typealias DeleteCommand = com.cherba29.boveda.cmds.db.snapshots.DeleteCommand
 typealias DeleteSnapshotCommand = com.cherba29.boveda.cmds.db.snapshots.DeleteSnapshotCommand
+typealias FolderCommand = com.cherba29.boveda.cmds.db.FolderCommand
+typealias FolderPrintDuplicatesCommand = com.cherba29.boveda.cmds.db.folder.PrintDuplicatesCommand
+typealias FolderDuplicatePair = com.cherba29.boveda.model.FolderDuplicatePair
+typealias DuplicateFileEntry = com.cherba29.boveda.model.DuplicateFileEntry
 
 /**
  * Entry point for scanning a directory, recording files into the database, and running queries.

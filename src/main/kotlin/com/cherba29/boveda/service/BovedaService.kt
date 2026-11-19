@@ -9,11 +9,13 @@ import com.cherba29.boveda.db.RepoFileInstances
 import com.cherba29.boveda.db.RepoFiles
 import com.cherba29.boveda.db.RepoSnapshot
 import com.cherba29.boveda.db.RepoSnapshots
+import com.cherba29.boveda.model.DuplicateFileEntry
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.model.DuplicateStatistics
 import com.cherba29.boveda.model.FileDeletionResult
 import com.cherba29.boveda.model.FileRecord
 import com.cherba29.boveda.model.FileRecordWithDuplicateRank
+import com.cherba29.boveda.model.FolderDuplicatePair
 import com.cherba29.boveda.model.PercentileBucket
 import com.cherba29.boveda.model.SnapshotSummary
 import com.cherba29.boveda.model.formatBytes
@@ -1047,6 +1049,212 @@ class BovedaService(
     formatPercentileTable(stats).lines().forEach { out(it) }
     out(sep)
     out("Total Wasted Storage: ${formatBytes(stats.wastedBytes)}")
+    out(line)
+    out("")
+  }
+
+  /**
+   * Identifies top folder pairs sharing the most duplicate files within [snapshotId].
+   *
+   * @param snapshotId The snapshot ID to inspect.
+   * @param limit The maximum number of top folder pairs to return.
+   */
+  fun findTopDuplicateFolderPairs(snapshotId: Int, limit: Int = 10): List<FolderDuplicatePair> =
+    transaction(database) {
+      val instances = (RepoFileInstances innerJoin RepoFiles)
+        .select(
+          RepoFileInstances.path,
+          RepoFiles.size,
+          RepoFiles.hash
+        )
+        .where { RepoFileInstances.snapshot eq snapshotId }
+        .toList()
+
+      if (instances.isEmpty()) return@transaction emptyList()
+
+      data class FileRow(val path: String, val size: Long, val hash: String)
+      val folderMap = mutableMapOf<String, MutableList<FileRow>>()
+      val hashToSize = mutableMapOf<String, Long>()
+
+      for (row in instances) {
+        val pathStr = row[RepoFileInstances.path]
+        val size = row[RepoFiles.size]
+        val hash = row[RepoFiles.hash]
+        val folder = Path.of(pathStr).parent?.normalize()?.invariantSeparatorsPathString ?: "/"
+        folderMap.getOrPut(folder) { mutableListOf() }.add(FileRow(pathStr, size, hash))
+        hashToSize[hash] = size
+      }
+
+      val hashToFolders = mutableMapOf<String, MutableSet<String>>()
+      for ((folder, files) in folderMap) {
+        for (file in files) {
+          hashToFolders.getOrPut(file.hash) { mutableSetOf() }.add(folder)
+        }
+      }
+
+      data class PairKey(val f1: String, val f2: String)
+      val candidatePairs = mutableSetOf<PairKey>()
+      for ((_, folders) in hashToFolders) {
+        if (folders.size > 1) {
+          val sorted = folders.toList().sorted()
+          for (i in 0 until sorted.size) {
+            for (j in (i + 1) until sorted.size) {
+              candidatePairs.add(PairKey(sorted[i], sorted[j]))
+            }
+          }
+        }
+      }
+
+      if (candidatePairs.isEmpty()) return@transaction emptyList()
+
+      val folderHashes = folderMap.mapValues { (_, files) ->
+        files.map { it.hash }.toSet()
+      }
+
+      val pairs = candidatePairs.map { (f1, f2) ->
+        val files1 = folderMap[f1] ?: emptyList()
+        val files2 = folderMap[f2] ?: emptyList()
+        val hashes1 = folderHashes[f1] ?: emptySet()
+        val hashes2 = folderHashes[f2] ?: emptySet()
+
+        val sharedHashes = hashes1.intersect(hashes2)
+        val diff1 = hashes1 - sharedHashes
+        val diff2 = hashes2 - sharedHashes
+
+        val sameFiles = sharedHashes.size.toLong()
+        val differentFiles = (diff1.size + diff2.size).toLong()
+        val totalFiles = sameFiles + differentFiles
+
+        val duplicatedStorage = sharedHashes.sumOf { hashToSize[it] ?: 0L }
+        val differentStorage = (diff1 + diff2).sumOf { hashToSize[it] ?: 0L }
+        val totalStorage = duplicatedStorage + differentStorage
+
+        val duplicateFilesPercentage = if (totalFiles > 0L) {
+          (sameFiles.toDouble() / totalFiles * 100.0)
+        } else {
+          0.0
+        }
+
+        val duplicateStoragePercentage = if (totalStorage > 0L) {
+          (duplicatedStorage.toDouble() / totalStorage * 100.0)
+        } else {
+          0.0
+        }
+
+        val top3Hashes = sharedHashes.sortedWith(
+          compareByDescending<String> { hashToSize[it] ?: 0L }.thenBy { it }
+        ).take(3)
+
+        val topDuplicateFiles = top3Hashes.map { hash ->
+          val size = hashToSize[hash] ?: 0L
+          val pathsInF1 = files1.filter { it.hash == hash }.map { it.path }
+          val pathsInF2 = files2.filter { it.hash == hash }.map { it.path }
+          val p1 = pathsInF1.first()
+          val p2 = pathsInF2.first()
+          val name1 = Path.of(p1).fileName?.toString() ?: p1
+          val name2 = Path.of(p2).fileName?.toString() ?: p2
+          val displayName = if (name1 == name2) name1 else "$name1 / $name2"
+
+          DuplicateFileEntry(
+            fileName = displayName,
+            size = size,
+            hash = hash,
+            path1 = p1,
+            path2 = p2,
+            pathsInFolder1 = pathsInF1,
+            pathsInFolder2 = pathsInF2
+          )
+        }
+
+        FolderDuplicatePair(
+          folder1 = f1,
+          folder2 = f2,
+          sameFiles = sameFiles,
+          differentFiles = differentFiles,
+          totalFiles = totalFiles,
+          duplicatedStorage = duplicatedStorage,
+          differentStorage = differentStorage,
+          totalStorage = totalStorage,
+          duplicateFilesPercentage = duplicateFilesPercentage,
+          duplicateStoragePercentage = duplicateStoragePercentage,
+          topDuplicateFiles = topDuplicateFiles
+        )
+      }
+
+      pairs.sortedWith(
+        compareByDescending<FolderDuplicatePair> { it.sameFiles }
+          .thenByDescending { it.duplicatedStorage }
+          .thenBy { it.folder1 }
+          .thenBy { it.folder2 }
+      ).take(limit)
+    }
+
+  /**
+   * Prints the duplicate folder pair statistics to the specified [out] printer.
+   */
+  fun printFolderDuplicatePairs(
+    pairs: List<FolderDuplicatePair>,
+    out: (String) -> Unit = ::println
+  ) {
+    val line = "=".repeat(80)
+    val sep = "-".repeat(80)
+
+    out("")
+    out(line)
+    out("                       TOP DUPLICATE FOLDER PAIRS")
+    out(line)
+
+    if (pairs.isEmpty()) {
+      out("No duplicate files found between folders.")
+      out(line)
+      out("")
+      return
+    }
+
+    out("Found ${pairs.size} folder pair(s) with duplicate files:")
+    out("")
+
+    pairs.forEachIndexed { index, pair ->
+      val num = (index + 1).toString().padStart(2)
+      out("$num. ${pair.folder1} <-> ${pair.folder2}")
+      out("  Same Files:                 ${String.format(Locale.US, "%,d", pair.sameFiles)} files")
+      out(
+        "  Different Files:            ${String.format(
+          Locale.US,
+          "%,d",
+          pair.differentFiles
+        )} files"
+      )
+      out("  Total Duplicated Storage:   ${formatBytes(pair.duplicatedStorage)}")
+      out(
+        "  Duplicate Files Share:      ${String.format(
+          Locale.US,
+          "%.2f%%",
+          pair.duplicateFilesPercentage
+        )}"
+      )
+      out(
+        "  Duplicate Storage Share:    ${String.format(
+          Locale.US,
+          "%.2f%%",
+          pair.duplicateStoragePercentage
+        )}"
+      )
+
+      if (pair.topDuplicateFiles.isNotEmpty()) {
+        val topCount = pair.topDuplicateFiles.size
+        out("  Top $topCount Largest Duplicate File(s):")
+        pair.topDuplicateFiles.forEachIndexed { fIdx, file ->
+          out("    ${fIdx + 1}. ${file.fileName} (${formatBytes(file.size)})")
+          out("       Folder 1: ${file.path1}")
+          out("       Folder 2: ${file.path2}")
+        }
+      }
+
+      if (index < pairs.lastIndex) {
+        out(sep)
+      }
+    }
     out(line)
     out("")
   }
