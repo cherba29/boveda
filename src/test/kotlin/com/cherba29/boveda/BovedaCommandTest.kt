@@ -2,7 +2,10 @@ package com.cherba29.boveda
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.progress.EstimatingProgressIndicator
+import com.cherba29.boveda.progress.MordantEstimatingProgressIndicator
 import com.github.ajalt.clikt.testing.test
+import com.github.ajalt.mordant.terminal.Terminal
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -189,6 +192,36 @@ class BovedaCommandTest {
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("files/s"))
       assertTrue(result.output.contains("MB/s"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan in interactive terminal displays estimating progress updates`() {
+    val tempDir = Files.createTempDirectory("clikt-scan-interactive-test")
+    val dbDir = Files.createTempDirectory("clikt-scan-interactive-db")
+    try {
+      tempDir.resolve("sample1.txt").writeText("content 1")
+      tempDir.resolve("sample2.txt").writeText("content 2")
+      val dbFile = dbDir.resolve("interactive_db")
+
+      var estimatingInvoked = false
+      val indicatorFactory: (Terminal) -> EstimatingProgressIndicator = { terminal ->
+        estimatingInvoked = true
+        MordantEstimatingProgressIndicator(terminal, updateIntervalMillis = 0L)
+      }
+
+      val command = BovedaCommand(estimatingProgressIndicatorFactory = indicatorFactory)
+      val result = command.test(
+        listOf("scan", tempDir.toString(), dbFile.toString()),
+        outputInteractive = true,
+        ansiLevel = com.github.ajalt.mordant.rendering.AnsiLevel.TRUECOLOR
+      )
+
+      assertEquals(0, result.statusCode)
+      assertTrue(estimatingInvoked)
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

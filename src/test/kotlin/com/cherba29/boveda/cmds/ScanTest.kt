@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.progress.EstimatingProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.scanner.DirectoryMetadata
 import com.cherba29.boveda.scanner.DirectoryMetadataScanner
@@ -227,6 +228,57 @@ class ScanTest {
       assertEquals(2L, configuredTotalFiles)
       assertEquals(18L, configuredTotalBytes)
       assertEquals(2, processedFilesCount)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command passes estimating progress updates from metadata scanner to estimating indicator`() {
+    val tempDir = Files.createTempDirectory("scan-est-meta-dir")
+    val dbDir = Files.createTempDirectory("scan-est-meta-db")
+    try {
+      tempDir.resolve("item1.txt").writeText("content 1")
+      val dbFile = dbDir.resolve("est_meta_db")
+
+      var estimatingFinished = false
+      val reportedProgress = mutableListOf<Pair<Long, Long>>()
+
+      val mockEstimatingIndicator = object : EstimatingProgressIndicator {
+        override fun onProgress(filesScanned: Long, bytesScanned: Long) {
+          reportedProgress.add(filesScanned to bytesScanned)
+        }
+
+        override fun finish() {
+          estimatingFinished = true
+        }
+      }
+
+      val mockMetadataScanner = object : DirectoryMetadataScanner {
+        override fun scan(rootPath: Path): DirectoryMetadata {
+          return DirectoryMetadata(fileCount = 1L, totalBytes = 9L)
+        }
+
+        override fun scan(
+          rootPath: Path,
+          onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
+        ): DirectoryMetadata {
+          onProgress(1L, 9L)
+          return DirectoryMetadata(fileCount = 1L, totalBytes = 9L)
+        }
+      }
+
+      val command = ScanCommand(
+        metadataScannerFactory = { mockMetadataScanner },
+        estimatingProgressIndicatorFactory = { mockEstimatingIndicator }
+      )
+
+      val result = command.test(listOf(tempDir.toString(), dbFile.toString()))
+
+      assertEquals(0, result.statusCode)
+      assertTrue(estimatingFinished)
+      assertEquals(listOf(1L to 9L), reportedProgress)
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

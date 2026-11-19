@@ -4,6 +4,8 @@ import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.hash.parseByteSize
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.progress.EstimatingProgressIndicator
+import com.cherba29.boveda.progress.MordantEstimatingProgressIndicator
 import com.cherba29.boveda.progress.MordantScanProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
 import com.cherba29.boveda.scanner.DirectoryMetadataScanner
@@ -37,7 +39,12 @@ import org.jetbrains.exposed.v1.jdbc.Database
 class ScanCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null,
   private val progressIndicatorFactory: ((Terminal) -> ScanProgressIndicator)? = null,
-  private val metadataScannerFactory: ((Int) -> DirectoryMetadataScanner)? = null
+  private val metadataScannerFactory: ((Int) -> DirectoryMetadataScanner)? = null,
+  private val estimatingProgressIndicatorFactory: (
+    (
+      Terminal
+    ) -> EstimatingProgressIndicator
+  )? = null
 ) : CliktCommand(
   name = "scan"
 ) {
@@ -225,7 +232,15 @@ class ScanCommand(
       }
 
     echo("Scanning directory: $targetDirectory")
-    val metadata = metadataScanner.scan(targetDirectory)
+    val estimatingIndicator = estimatingProgressIndicatorFactory?.invoke(terminal)
+      ?: MordantEstimatingProgressIndicator(terminal = terminal)
+    val metadata = try {
+      metadataScanner.scan(targetDirectory) { filesScanned, bytesScanned ->
+        estimatingIndicator.onProgress(filesScanned, bytesScanned)
+      }
+    } finally {
+      estimatingIndicator.finish()
+    }
 
     val existingEntries = if (continueId != null) {
       service.getSnapshotFileEntries(continueId)

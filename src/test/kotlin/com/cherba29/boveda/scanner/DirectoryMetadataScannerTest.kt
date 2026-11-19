@@ -95,4 +95,41 @@ class DirectoryMetadataScannerTest {
       WorkStealingMetadataScanner(parallelism = -1)
     }
   }
+
+  @Test
+  fun `both scanners invoke onProgress with progressive counts and total size`() {
+    val tempDir = Files.createTempDirectory("meta-progress-test")
+    try {
+      val sub = Files.createDirectory(tempDir.resolve("sub"))
+      tempDir.resolve("fileA.bin").writeBytes(ByteArray(100))
+      tempDir.resolve("fileB.bin").writeBytes(ByteArray(200))
+      sub.resolve("fileC.bin").writeBytes(ByteArray(300))
+
+      val seqProgress = mutableListOf<Pair<Long, Long>>()
+      val seqResult = FileTreeMetadataScanner.scan(tempDir) { files, bytes ->
+        seqProgress.add(files to bytes)
+      }
+
+      assertEquals(3L, seqResult.fileCount)
+      assertEquals(600L, seqResult.totalBytes)
+      assertEquals(3, seqProgress.size)
+      assertEquals(3L, seqProgress.last().first)
+      assertEquals(600L, seqProgress.last().second)
+
+      val wsProgress = java.util.concurrent.CopyOnWriteArrayList<Pair<Long, Long>>()
+      val wsScanner = WorkStealingMetadataScanner(parallelism = 2)
+      val wsResult = wsScanner.scan(tempDir) { files, bytes ->
+        wsProgress.add(files to bytes)
+      }
+
+      assertEquals(3L, wsResult.fileCount)
+      assertEquals(600L, wsResult.totalBytes)
+      assertEquals(3, wsProgress.size)
+      // Progress calls must end at total counts
+      assertEquals(3L, wsProgress.maxOf { it.first })
+      assertEquals(600L, wsProgress.maxOf { it.second })
+    } finally {
+      tempDir.toFile().deleteRecursively()
+    }
+  }
 }

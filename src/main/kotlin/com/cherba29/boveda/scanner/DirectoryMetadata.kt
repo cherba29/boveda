@@ -11,6 +11,7 @@ import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.ForkJoinWorkerThread
 import java.util.concurrent.RecursiveTask
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.LongAdder
 import kotlin.io.path.fileSize
 
 /**
@@ -36,6 +37,15 @@ interface DirectoryMetadataScanner {
    * Recursively scans [rootPath] and returns the aggregated [DirectoryMetadata].
    */
   fun scan(rootPath: Path): DirectoryMetadata
+
+  /**
+   * Recursively scans [rootPath] and returns the aggregated [DirectoryMetadata],
+   * reporting progressive discoveries via [onProgress].
+   */
+  fun scan(
+    rootPath: Path,
+    onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
+  ): DirectoryMetadata = scan(rootPath)
 }
 
 /**
@@ -43,7 +53,12 @@ interface DirectoryMetadataScanner {
  * Retrieves inode/file attributes directly from directory traversal without reading file contents.
  */
 object FileTreeMetadataScanner : DirectoryMetadataScanner {
-  override fun scan(rootPath: Path): DirectoryMetadata {
+  override fun scan(rootPath: Path): DirectoryMetadata = scan(rootPath) { _, _ -> }
+
+  override fun scan(
+    rootPath: Path,
+    onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
+  ): DirectoryMetadata {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
@@ -57,6 +72,7 @@ object FileTreeMetadataScanner : DirectoryMetadataScanner {
           if (attrs.isRegularFile) {
             fileCount++
             totalBytes += attrs.size()
+            onProgress(fileCount, totalBytes)
           } else if (attrs.isSymbolicLink && Files.isRegularFile(file)) {
             fileCount++
             totalBytes += try {
@@ -64,6 +80,7 @@ object FileTreeMetadataScanner : DirectoryMetadataScanner {
             } catch (_: Exception) {
               0L
             }
+            onProgress(fileCount, totalBytes)
           }
           return FileVisitResult.CONTINUE
         }
@@ -104,7 +121,10 @@ class WorkStealingMetadataScanner(
   }
 
   private class ScanMetadataTask(
-    private val dir: Path
+    private val dir: Path,
+    private val filesCounter: LongAdder,
+    private val bytesCounter: LongAdder,
+    private val onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
   ) : RecursiveTask<DirectoryMetadata>() {
     override fun compute(): DirectoryMetadata {
       if (Thread.currentThread().isInterrupted) return DirectoryMetadata.EMPTY
@@ -127,17 +147,25 @@ class WorkStealingMetadataScanner(
                 LinkOption.NOFOLLOW_LINKS
               )
               if (attrs.isDirectory) {
-                subTasks.add(ScanMetadataTask(normalized))
+                subTasks.add(ScanMetadataTask(normalized, filesCounter, bytesCounter, onProgress))
               } else if (attrs.isRegularFile) {
+                val size = attrs.size()
                 fileCount++
-                totalBytes += attrs.size()
+                totalBytes += size
+                filesCounter.increment()
+                bytesCounter.add(size)
+                onProgress(filesCounter.sum(), bytesCounter.sum())
               } else if (attrs.isSymbolicLink && Files.isRegularFile(normalized)) {
-                fileCount++
-                totalBytes += try {
+                val size = try {
                   normalized.fileSize()
                 } catch (_: Exception) {
                   0L
                 }
+                fileCount++
+                totalBytes += size
+                filesCounter.increment()
+                bytesCounter.add(size)
+                onProgress(filesCounter.sum(), bytesCounter.sum())
               }
             } catch (_: Exception) {
               // Ignore inaccessible or unreadable entries
@@ -161,7 +189,12 @@ class WorkStealingMetadataScanner(
     }
   }
 
-  override fun scan(rootPath: Path): DirectoryMetadata {
+  override fun scan(rootPath: Path): DirectoryMetadata = scan(rootPath) { _, _ -> }
+
+  override fun scan(
+    rootPath: Path,
+    onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
+  ): DirectoryMetadata {
     require(Files.exists(rootPath)) { "Target path does not exist: $rootPath" }
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
@@ -172,8 +205,10 @@ class WorkStealingMetadataScanner(
       null,
       false
     )
+    val filesCounter = LongAdder()
+    val bytesCounter = LongAdder()
     return try {
-      pool.invoke(ScanMetadataTask(normalizedRoot))
+      pool.invoke(ScanMetadataTask(normalizedRoot, filesCounter, bytesCounter, onProgress))
     } finally {
       pool.shutdownNow()
     }
