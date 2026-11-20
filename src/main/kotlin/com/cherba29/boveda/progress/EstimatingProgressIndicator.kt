@@ -35,15 +35,48 @@ data class EstimatingProgressState(
   val action: String = "Estimating files to scan:",
   val timeProvider: () -> Long = { System.nanoTime() }
 ) {
-  val formattedFiles: String
+  val elapsedNanos: Long
+    get() = (timeProvider() - startTimeNanos).coerceAtLeast(0L)
+
+  val elapsedSeconds: Double
+    get() = elapsedNanos / 1_000_000_000.0
+
+  /** Average estimation speed in files per second. */
+  val filesPerSecond: Double
+    get() = if (elapsedSeconds > 0.000001) filesScanned / elapsedSeconds else 0.0
+
+  /** Average estimation speed in bytes per second. */
+  val bytesPerSecond: Double
+    get() = if (elapsedSeconds > 0.000001) bytesScanned / elapsedSeconds else 0.0
+
+  /** Average estimation speed in megabytes per second (using binary megabyte: 1,048,576 bytes). */
+  val megaBytesPerSecond: Double
+    get() = bytesPerSecond / (1024.0 * 1024.0)
+
+  val formattedFileCount: String
     get() = if (filesScanned == 1L) {
-      "1 file scanned"
+      "1 file"
     } else {
-      String.format(Locale.US, "%,d files scanned", filesScanned)
+      String.format(Locale.US, "%,d files", filesScanned)
     }
 
+  val formattedBytes: String
+    get() = formatBytesShort(bytesScanned)
+
+  val formattedFiles: String
+    get() = "$formattedFileCount scanned"
+
   val formattedStorage: String
-    get() = "${formatBytesShort(bytesScanned)} scanned"
+    get() = "$formattedBytes scanned"
+
+  /** Human-readable string representation of average estimation speeds (files/s and storage/s). */
+  val formattedSpeed: String
+    get() = String.format(
+      Locale.US,
+      "%,.1f files/s, %s/s",
+      filesPerSecond,
+      formatBytesShort(bytesPerSecond.toLong())
+    )
 }
 
 /**
@@ -87,9 +120,10 @@ class MordantEstimatingProgressIndicator(
     if (isInteractive) {
       val layout = progressBarContextLayout<EstimatingProgressState> {
         spinner(Spinner.Dots())
-        text { "${context.action} " }
-        text { context.formattedFiles }
-        text { ", ${context.formattedStorage} " }
+        text {
+          "${context.action} ${context.formattedFileCount}, " +
+            "${context.formattedBytes} (${context.formattedSpeed})"
+        }
         timeElapsed()
       }
 
@@ -121,7 +155,7 @@ class MordantEstimatingProgressIndicator(
     }
   }
 
-  private fun currentState(action: String = "Estimating files to scan:"): EstimatingProgressState {
+  private fun currentState(action: String = "Estimating:"): EstimatingProgressState {
     return EstimatingProgressState(
       filesScanned = filesCount.get(),
       bytesScanned = bytesCount.get(),

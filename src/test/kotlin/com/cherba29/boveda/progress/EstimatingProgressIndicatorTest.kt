@@ -37,6 +37,42 @@ class EstimatingProgressIndicatorTest {
   }
 
   @Test
+  fun `EstimatingProgressState computes files per second and storage per second accurately`() {
+    val zeroElapsed = EstimatingProgressState(
+      filesScanned = 0L,
+      bytesScanned = 0L,
+      startTimeNanos = 1_000_000L,
+      timeProvider = { 1_000_000L }
+    )
+    assertEquals(0.0, zeroElapsed.elapsedSeconds)
+    assertEquals(0.0, zeroElapsed.filesPerSecond)
+    assertEquals(0.0, zeroElapsed.bytesPerSecond)
+    assertEquals(0.0, zeroElapsed.megaBytesPerSecond)
+    assertEquals("0.0 files/s, 0 B/s", zeroElapsed.formattedSpeed)
+
+    // 3,000 files and 30 MB scanned in 2.0 seconds -> 1,500.0 files/s, 15.00 MB/s
+    val activeState = EstimatingProgressState(
+      filesScanned = 3_000L,
+      bytesScanned = 30L * 1024L * 1024L,
+      startTimeNanos = 0L,
+      timeProvider = { 2_000_000_000L }
+    )
+    assertEquals(2.0, activeState.elapsedSeconds)
+    assertEquals(1_500.0, activeState.filesPerSecond)
+    assertEquals(15.0, activeState.megaBytesPerSecond)
+    assertEquals("1,500.0 files/s, 15.00 MB/s", activeState.formattedSpeed)
+
+    // Multi-GB throughput: 4 GB scanned in 2.0 seconds -> 2.00 GB/s
+    val fastState = EstimatingProgressState(
+      filesScanned = 20_000L,
+      bytesScanned = 4L * 1024L * 1024L * 1024L,
+      startTimeNanos = 0L,
+      timeProvider = { 2_000_000_000L }
+    )
+    assertEquals("10,000.0 files/s, 2.00 GB/s", fastState.formattedSpeed)
+  }
+
+  @Test
   fun `NoOpEstimatingProgressIndicator does not throw on operations`() {
     val indicator = NoOpEstimatingProgressIndicator()
     indicator.onProgress(10L, 1024L)
@@ -83,14 +119,16 @@ class EstimatingProgressIndicatorTest {
     currentTime += 500_000_000L
     indicator.onProgress(50L, 25_000L)
 
-    Thread.sleep(50)
+    Thread.sleep(100)
     indicator.finish()
 
     val output = recorder.output()
     assertTrue(
-      output.contains("Estimating files to scan:") ||
-        output.contains("files scanned") ||
-        output.contains("scanned")
+      output.contains("Estimating:"),
+      "Expected Estimating prefix in output, got:\n$output"
     )
+    assertTrue(output.contains("files"), "Expected file count in output, got:\n$output")
+    assertTrue(output.contains("files/s"), "Expected files/s rate in output, got:\n$output")
+    assertTrue(output.contains("/s)"), "Expected storage/s rate in output, got:\n$output")
   }
 }
