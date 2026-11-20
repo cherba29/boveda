@@ -62,23 +62,37 @@ data class ScanProgressState(
       0.0
     }
 
-  /** Current completion percentage (0.0 to 100.0) based on bytes (or files), or null if indeterminate. */
+  /**
+   * Current completion percentage (0.0 to 100.0) based on file count (falling back to bytes if
+   * file count is unavailable), or null if indeterminate.
+   */
   val percentage: Double?
     get() = when {
-      totalBytes != null && totalBytes > 0L -> {
-        (bytesProcessed.toDouble() / totalBytes * 100.0).coerceIn(0.0, 100.0)
-      }
-      totalBytes != null && totalBytes == 0L -> 100.0
       totalFiles != null && totalFiles > 0L -> {
         (filesProcessed.toDouble() / totalFiles * 100.0).coerceIn(0.0, 100.0)
       }
       totalFiles != null && totalFiles == 0L -> 100.0
+      totalBytes != null && totalBytes > 0L -> {
+        (bytesProcessed.toDouble() / totalBytes * 100.0).coerceIn(0.0, 100.0)
+      }
+      totalBytes != null && totalBytes == 0L -> 100.0
       else -> null
     }
 
-  /** Estimated remaining time in seconds based on processing speed, or null if indeterminate. */
+  /**
+   * Estimated remaining time in seconds based on file processing speed (falling back to byte
+   * processing speed if file count is unavailable), or null if indeterminate.
+   */
   val etaSeconds: Double?
     get() = when {
+      totalFiles != null -> {
+        val remainingFiles = (totalFiles - filesProcessed).coerceAtLeast(0L)
+        if (remainingFiles == 0L) {
+          0.0
+        } else {
+          if (filesPerSecond > 0.0) remainingFiles / filesPerSecond else null
+        }
+      }
       totalBytes != null -> {
         val remainingBytes = (totalBytes - bytesProcessed).coerceAtLeast(0L)
         if (remainingBytes == 0L) {
@@ -86,14 +100,6 @@ data class ScanProgressState(
         } else {
           val bytesPerSec = if (elapsedSeconds > 0.000001) bytesProcessed / elapsedSeconds else 0.0
           if (bytesPerSec > 0.0) remainingBytes / bytesPerSec else null
-        }
-      }
-      totalFiles != null -> {
-        val remainingFiles = (totalFiles - filesProcessed).coerceAtLeast(0L)
-        if (remainingFiles == 0L) {
-          0.0
-        } else {
-          if (filesPerSecond > 0.0) remainingFiles / filesPerSecond else null
         }
       }
       else -> null
@@ -231,12 +237,12 @@ class MordantScanProgressIndicator(
       }
       this.executor = exec
 
-      val initialTotal = totalBytes?.takeIf { it > 0L } ?: totalFiles?.takeIf { it > 0L }
-      val initialCompleted = if (totalBytes != null && totalBytes > 0L) {
-        initialBytes
-      } else {
-        initialFiles
-      }
+      val (initialCompleted, initialTotal) = resolveProgress(
+        files = initialFiles,
+        bytes = initialBytes,
+        totalFiles = totalFiles,
+        totalBytes = totalBytes
+      )
       val anim = layout.animateOnThread(
         terminal = terminal,
         context = currentState(),
@@ -247,6 +253,17 @@ class MordantScanProgressIndicator(
       this.animator = anim
       anim.execute(exec)
     }
+  }
+
+  private fun resolveProgress(
+    files: Long,
+    bytes: Long,
+    totalFiles: Long?,
+    totalBytes: Long?
+  ): Pair<Long, Long?> = when {
+    totalFiles != null && totalFiles > 0L -> files to totalFiles
+    totalBytes != null && totalBytes > 0L -> bytes to totalBytes
+    else -> files to null
   }
 
   private fun currentState(action: String = "Scanning & ingesting:"): ScanProgressState {
@@ -275,11 +292,12 @@ class MordantScanProgressIndicator(
     totalFilesRef.set(totalFiles)
     totalBytesRef.set(totalBytes)
     if (isInteractive) {
-      val (currentCompleted, currentTotal) = when {
-        totalBytes != null && totalBytes > 0L -> bytesCount.get() to totalBytes
-        totalFiles != null && totalFiles > 0L -> filesCount.get() to totalFiles
-        else -> bytesCount.get() to null
-      }
+      val (currentCompleted, currentTotal) = resolveProgress(
+        files = filesCount.get(),
+        bytes = bytesCount.get(),
+        totalFiles = totalFiles,
+        totalBytes = totalBytes
+      )
       animator?.update {
         context = currentState()
         completed = currentCompleted
@@ -305,11 +323,12 @@ class MordantScanProgressIndicator(
       if (shouldUpdate) {
         val tBytes = totalBytesRef.get()
         val tFiles = totalFilesRef.get()
-        val (currentCompleted, currentTotal) = when {
-          tBytes != null && tBytes > 0L -> bytes to tBytes
-          tFiles != null && tFiles > 0L -> count to tFiles
-          else -> bytes to null
-        }
+        val (currentCompleted, currentTotal) = resolveProgress(
+          files = count,
+          bytes = bytes,
+          totalFiles = tFiles,
+          totalBytes = tBytes
+        )
 
         animator?.update {
           context = ScanProgressState(
