@@ -31,11 +31,12 @@ import com.github.ajalt.mordant.rendering.BorderType
 import com.github.ajalt.mordant.rendering.TextAlign
 import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.terminal.Terminal
+import com.google.common.cache.Cache
+import com.google.common.cache.CacheBuilder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.invariantSeparatorsPathString
 import kotlin.time.Duration
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -71,14 +72,18 @@ class BovedaService(
   private val deduplicateFiles: Boolean = true,
   val batchSize: Int = DEFAULT_BATCH_SIZE,
   val cache: DeduplicationCache = InMemoryDeduplicationCache(),
-  private val warmUpCache: Boolean = true
+  private val warmUpCache: Boolean = true,
+  maxFolderCacheSize: Long = DEFAULT_FOLDER_CACHE_MAX_SIZE
 ) {
 
   companion object {
     const val DEFAULT_BATCH_SIZE = 1000
+    const val DEFAULT_FOLDER_CACHE_MAX_SIZE = 50_000L
   }
 
-  private val folderCache = ConcurrentHashMap<Pair<Int, String>, EntityID<Int>>()
+  private val folderCache: Cache<Pair<Int, String>, Int> = CacheBuilder.newBuilder()
+    .maximumSize(maxFolderCacheSize.coerceAtLeast(1L))
+    .build()
 
   /**
    * Resolves the parent folder path of [path] in normalized invariant-separator format.
@@ -86,19 +91,36 @@ class BovedaService(
   fun getParentFolderPath(path: Path): String =
     path.parent?.normalize()?.invariantSeparatorsPathString ?: "/"
 
-  private fun ensureFoldersExist(snapshotId: EntityID<Int>, folderPaths: Collection<String>) {
-    val missing = folderPaths.filter { !folderCache.containsKey(Pair(snapshotId.value, it)) }
-    if (missing.isEmpty()) return
+  private fun ensureFoldersExist(
+    snapshotId: EntityID<Int>,
+    folderPaths: Collection<String>
+  ): Map<String, EntityID<Int>> {
+    val resolved = HashMap<String, EntityID<Int>>(folderPaths.size)
+    val missing = mutableListOf<String>()
+
+    for (folderPath in folderPaths) {
+      val cachedId = folderCache.getIfPresent(Pair(snapshotId.value, folderPath))
+      if (cachedId != null) {
+        resolved[folderPath] = EntityID(cachedId, RepoFolders)
+      } else {
+        missing.add(folderPath)
+      }
+    }
+
+    if (missing.isEmpty()) return resolved
 
     for (chunk in missing.chunked(500)) {
       RepoFolders.select(RepoFolders.id, RepoFolders.path)
         .where { (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path inList chunk) }
         .forEach { row ->
-          folderCache[Pair(snapshotId.value, row[RepoFolders.path])] = row[RepoFolders.id]
+          val path = row[RepoFolders.path]
+          val id = row[RepoFolders.id]
+          resolved[path] = id
+          folderCache.put(Pair(snapshotId.value, path), id.value)
         }
     }
 
-    val stillMissing = missing.filter { !folderCache.containsKey(Pair(snapshotId.value, it)) }
+    val stillMissing = missing.filter { it !in resolved }
     if (stillMissing.isNotEmpty()) {
       val inserted = RepoFolders.batchInsert(
         stillMissing,
@@ -110,14 +132,18 @@ class BovedaService(
         this[RepoFolders.totalBytes] = 0L
       }
       for ((p, row) in stillMissing.zip(inserted)) {
-        folderCache[Pair(snapshotId.value, p)] = row[RepoFolders.id]
+        val id = row[RepoFolders.id]
+        resolved[p] = id
+        folderCache.put(Pair(snapshotId.value, p), id.value)
       }
     }
+
+    return resolved
   }
 
   private fun getOrCreateFolderId(snapshotId: EntityID<Int>, folderPath: String): EntityID<Int> {
-    ensureFoldersExist(snapshotId, listOf(folderPath))
-    return folderCache[Pair(snapshotId.value, folderPath)]
+    val resolved = ensureFoldersExist(snapshotId, listOf(folderPath))
+    return resolved[folderPath]
       ?: error("Failed to resolve folder id for $folderPath")
   }
 
@@ -193,7 +219,7 @@ class BovedaService(
       }
 
       val folderPathsInBatch = batch.map { getParentFolderPath(it.path) }.distinct()
-      ensureFoldersExist(snapshot.id, folderPathsInBatch)
+      val folderIds = ensureFoldersExist(snapshot.id, folderPathsInBatch)
 
       if (!deduplicateFiles) {
         val insertedFiles = RepoFiles.batchInsert(
@@ -209,8 +235,8 @@ class BovedaService(
           shouldReturnGeneratedValues = false
         ) { (file, fileRow) ->
           val folderPath = getParentFolderPath(file.path)
-          val folderId = folderCache[Pair(snapshot.id.value, folderPath)]
-            ?: error("Folder $folderPath must be cached")
+          val folderId = folderIds[folderPath]
+            ?: error("Folder $folderPath must be resolved")
           this[RepoFileInstances.snapshot] = snapshot.id
           this[RepoFileInstances.folder] = folderId
           this[RepoFileInstances.file] = fileRow[RepoFiles.id]
@@ -221,30 +247,40 @@ class BovedaService(
       }
 
       // Deduplication enabled:
+      // Keep a batch-local map so bounded LRU evictions in `cache` can never lose an ID mid-batch.
+      val batchFileIds = HashMap<FileContentKey, EntityID<Int>>(batch.size)
+      val missingFromCache = mutableListOf<ScannedFile>()
+
       // 1. Identify files missing from the in-memory cache (increments hits/misses)
-      val missingFromCache = batch.filter { cache.get(it.size, it.hash) == null }
+      for (file in batch) {
+        val cachedId = cache.get(file.size, file.hash)
+        if (cachedId != null) {
+          batchFileIds[FileContentKey(file.size, file.hash)] = cachedId
+        } else {
+          missingFromCache.add(file)
+        }
+      }
 
       if (missingFromCache.isNotEmpty()) {
         val uniqueMissing = missingFromCache.distinctBy { FileContentKey(it.size, it.hash) }
 
-        // Check if any missing files exist in DB (e.g. if cache was not pre-warmed)
+        // Check if any missing files exist in DB (e.g. if cache was not pre-warmed or evicted)
         val missingHashes = uniqueMissing.map { it.hash }.distinct()
-        val existingInDb = mutableMapOf<FileContentKey, EntityID<Int>>()
         for (chunk in missingHashes.chunked(500)) {
           RepoFiles.select(RepoFiles.id, RepoFiles.size, RepoFiles.hash)
             .where { RepoFiles.hash inList chunk }
             .forEach { row ->
               val key = FileContentKey(row[RepoFiles.size], row[RepoFiles.hash])
-              existingInDb[key] = row[RepoFiles.id]
+              val entityId = row[RepoFiles.id]
+              batchFileIds[key] = entityId
+              cache.put(key.size, key.hash, entityId)
             }
         }
 
-        for ((key, entityId) in existingInDb) {
-          cache.put(key.size, key.hash, entityId)
-        }
-
         // Brand new files not in cache or DB
-        val brandNewFiles = uniqueMissing.filter { !cache.contains(it.size, it.hash) }
+        val brandNewFiles = uniqueMissing.filter {
+          FileContentKey(it.size, it.hash) !in batchFileIds
+        }
         if (brandNewFiles.isNotEmpty()) {
           val insertedRows = RepoFiles.batchInsert(
             brandNewFiles,
@@ -254,18 +290,21 @@ class BovedaService(
             this[RepoFiles.hash] = file.hash
           }
           for (row in insertedRows) {
-            cache.put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
+            val key = FileContentKey(row[RepoFiles.size], row[RepoFiles.hash])
+            val entityId = row[RepoFiles.id]
+            batchFileIds[key] = entityId
+            cache.put(key.size, key.hash, entityId)
           }
         }
       }
 
-      // 2. All files are guaranteed to be in cache. Batch insert instances.
+      // 2. All files are guaranteed to be in batchFileIds. Batch insert instances.
       RepoFileInstances.batchInsert(batch, shouldReturnGeneratedValues = false) { file ->
-        val entityId = cache.peek(file.size, file.hash)
-          ?: error("Cache must contain file id for hash ${file.hash} and size ${file.size}")
+        val entityId = batchFileIds[FileContentKey(file.size, file.hash)]
+          ?: error("Resolved file id missing for hash ${file.hash} and size ${file.size}")
         val folderPath = getParentFolderPath(file.path)
-        val folderId = folderCache[Pair(snapshot.id.value, folderPath)]
-          ?: error("Folder $folderPath must be cached")
+        val folderId = folderIds[folderPath]
+          ?: error("Folder $folderPath must be resolved")
         this[RepoFileInstances.snapshot] = snapshot.id
         this[RepoFileInstances.folder] = folderId
         this[RepoFileInstances.file] = entityId
@@ -403,7 +442,7 @@ class BovedaService(
       RepoFiles.id notInSubQuery (RepoFileInstances.select(RepoFileInstances.file))
     }
     snapshot.delete()
-    folderCache.keys.removeIf { it.first == snapshotId }
+    folderCache.asMap().keys.removeIf { it.first == snapshotId }
     true
   }
 

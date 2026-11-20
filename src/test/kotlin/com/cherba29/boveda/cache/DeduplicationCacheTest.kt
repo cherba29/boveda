@@ -8,6 +8,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -134,5 +135,33 @@ class DeduplicationCacheTest {
     } finally {
       executor.shutdown()
     }
+  }
+
+  @Test
+  fun `bounded cache evicts entries past maxSize and caps warmUp`() {
+    assertFailsWith<IllegalArgumentException> {
+      InMemoryDeduplicationCache(maxSize = 0)
+    }
+
+    val cache = InMemoryDeduplicationCache(maxSize = 5)
+    for (i in 1..20) {
+      cache.put(i.toLong(), "hash-$i", EntityID(i, RepoFiles))
+    }
+    assertTrue(cache.size() <= 5, "Cache size ${cache.size()} exceeded maxSize 5")
+
+    val db = createTestDb()
+    transaction(db) {
+      for (i in 1..10) {
+        RepoFile.new {
+          size = i.toLong()
+          hash = "db-hash-$i"
+        }
+      }
+    }
+
+    val bounded = InMemoryDeduplicationCache(maxSize = 4)
+    val loaded = bounded.warmUp(db)
+    assertEquals(4, loaded)
+    assertEquals(4, bounded.size())
   }
 }

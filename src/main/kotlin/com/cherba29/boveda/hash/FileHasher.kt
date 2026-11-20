@@ -104,11 +104,25 @@ fun parseByteSize(value: String?): Long? {
  * Standard implementation of [FileHasher] supporting high-performance non-cryptographic hashes
  * (such as XXH3, XXH3_128, CRC32, CRC32C) as well as Java [MessageDigest] cryptographic algorithms (such as MD5, SHA-256).
  *
- * @property bufferSize The buffer size in bytes used when reading stream chunks (default 1MB).
+ * @property bufferSize The reusable per-thread buffer size in bytes used when reading stream chunks (default 128 KB).
  */
 open class MessageDigestFileHasher(
-  private val bufferSize: Int = 1024 * 1024
+  private val bufferSize: Int = DEFAULT_BUFFER_SIZE
 ) : FileHasher {
+
+  companion object {
+    /**
+     * Default per-thread stream read buffer (128 KB). Kept well below G1GC humongous allocation
+     * thresholds while remaining large enough to saturate NVMe/SSD sequential reads.
+     */
+    const val DEFAULT_BUFFER_SIZE = 128 * 1024
+  }
+
+  init {
+    require(bufferSize >= 1) { "bufferSize must be at least 1, but was $bufferSize" }
+  }
+
+  private val threadLocalBuffer = ThreadLocal.withInitial { ByteArray(bufferSize) }
 
   override fun computeHash(file: File, algorithm: String): String =
     computeHash(file, algorithm, maxBytes = null)
@@ -223,12 +237,7 @@ open class MessageDigestFileHasher(
     onChunk: (buffer: ByteArray, len: Int) -> Unit
   ) {
     var remaining = maxBytes
-    val bufSize = if (remaining != null) {
-      minOf(bufferSize.toLong(), remaining).toInt().coerceAtLeast(1)
-    } else {
-      bufferSize
-    }
-    val buffer = ByteArray(bufSize)
+    val buffer = threadLocalBuffer.get()
     while (remaining == null || remaining > 0) {
       val toRead = if (remaining != null) {
         minOf(buffer.size.toLong(), remaining).toInt()

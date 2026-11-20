@@ -10,8 +10,10 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.ForkJoinWorkerThread
 import java.util.concurrent.RecursiveTask
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.LongAdder
+import java.util.function.Predicate
 import kotlin.io.path.fileSize
 
 /**
@@ -199,11 +201,18 @@ class WorkStealingMetadataScanner(
     require(Files.isDirectory(rootPath)) { "Target path is not a directory: $rootPath" }
 
     val normalizedRoot = rootPath.normalize()
+    // Strictly cap maximumPoolSize to parallelism to prevent compensation thread storms on slow I/O
     val pool = ForkJoinPool(
       parallelism,
       NamedForkJoinWorkerThreadFactory("boveda-metadata-scanner"),
       null,
-      false
+      false,
+      parallelism,
+      parallelism,
+      1,
+      Predicate { true },
+      60L,
+      TimeUnit.SECONDS
     )
     val filesCounter = LongAdder()
     val bytesCounter = LongAdder()

@@ -9,7 +9,9 @@ import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.ForkJoinWorkerThread
 import java.util.concurrent.RecursiveAction
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.function.Predicate
 import kotlin.io.path.fileSize
 import kotlin.io.path.getLastModifiedTime
 import kotlin.io.path.invariantSeparatorsPathString
@@ -167,7 +169,7 @@ class WorkStealingDirectoryScanner(
         return
       }
 
-      // Chunk discovered files into hash tasks
+      // Chunk discovered files into hash tasks and clear intermediate list to release references
       val hashTasks = mutableListOf<RecursiveAction>()
       if (discoveredFiles.isNotEmpty()) {
         for (chunk in discoveredFiles.chunked(fileChunkSize)) {
@@ -181,12 +183,17 @@ class WorkStealingDirectoryScanner(
             )
           )
         }
+        discoveredFiles.clear()
       }
 
-      // Fork all directory exploration and file hashing tasks into the work-stealing pool
-      val allTasks = ArrayList<RecursiveAction>(subDirTasks.size + hashTasks.size)
-      allTasks.addAll(subDirTasks)
+      // Place hash tasks first so the current worker hashes files immediately (applying queue
+      // backpressure early) while subdirectory tasks sit at the deque base for stealing by idle
+      // workers.
+      val allTasks = ArrayList<RecursiveAction>(hashTasks.size + subDirTasks.size)
       allTasks.addAll(hashTasks)
+      allTasks.addAll(subDirTasks)
+      hashTasks.clear()
+      subDirTasks.clear()
 
       if (allTasks.isNotEmpty()) {
         invokeAll(allTasks)
@@ -219,11 +226,19 @@ class WorkStealingDirectoryScanner(
       val resultQueue = ArrayBlockingQueue<ResultItem>(queueCapacity)
       // LIFO depth-first traversal with FIFO work-stealing from top of deque
       val asyncMode = false
+      // Cap maximumPoolSize to parallelism and allow saturation so blocking resultQueue.put()
+      // backpressure never triggers ForkJoinPool compensation thread storms (pthread_create EAGAIN).
       val pool = ForkJoinPool(
         parallelism,
         NamedForkJoinWorkerThreadFactory("boveda-work-stealing"),
         null,
-        asyncMode
+        asyncMode,
+        parallelism,
+        parallelism,
+        1,
+        Predicate { true },
+        60L,
+        TimeUnit.SECONDS
       )
 
       val rootTask = ScanDirectoryTask(

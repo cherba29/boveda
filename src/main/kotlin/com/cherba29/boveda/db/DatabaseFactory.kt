@@ -22,12 +22,18 @@ object DatabaseFactory {
   }
 
   /**
+   * Default H2 in-memory page cache limit in KB (16 MB target, capping H2's JVM heap footprint).
+   */
+  const val DEFAULT_H2_CACHE_SIZE_KB = 16_384
+
+  /**
    * Connects to a persistent file-based H2 database at [path] and initializes tables.
    */
-  fun connectFile(path: String): Database {
+  fun connectFile(path: String, cacheSizeKb: Int = DEFAULT_H2_CACHE_SIZE_KB): Database {
+    require(cacheSizeKb >= 0) { "cacheSizeKb must be non-negative, but was $cacheSizeKb" }
     val normalizedPath = if (path.endsWith(".mv.db")) path.removeSuffix(".mv.db") else path
     val database = Database.connect(
-      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1",
+      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1;CACHE_SIZE=$cacheSizeKb",
       driver = "org.h2.Driver"
     )
     initSchema(database)

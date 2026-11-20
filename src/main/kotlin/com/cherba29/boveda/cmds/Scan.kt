@@ -104,8 +104,9 @@ class ScanCommand(
   val threads: Int by option(
     "-t",
     "--threads",
-    help = "Number of worker threads for parallel file hashing (defaults to available CPU cores)."
-  ).int().default(Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+    help = "Number of worker threads for parallel file hashing " +
+      "(defaults to available CPU cores, capped at 8)."
+  ).int().default(Runtime.getRuntime().availableProcessors().coerceIn(1, 8))
 
   val scannerType: String by option(
     "-s",
@@ -127,6 +128,11 @@ class ScanCommand(
   val noCacheWarmup: Boolean by option(
     "--no-cache-warmup",
     help = "Disable pre-warming the in-memory deduplication cache from the database on startup."
+  ).flag(default = false)
+
+  val noEstimate: Boolean by option(
+    "--no-estimate",
+    help = "Skip the initial directory traversal that estimates total file count and size."
   ).flag(default = false)
 
   val logLevel: Level? by option(
@@ -224,22 +230,25 @@ class ScanCommand(
       validateScanDirectory(dir)
     }
 
-    val metadataScanner: DirectoryMetadataScanner = metadataScannerFactory?.invoke(threads)
-      ?: if (threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true)) {
-        FileTreeMetadataScanner
-      } else {
-        WorkStealingMetadataScanner(parallelism = threads)
-      }
-
     echo("Scanning directory: $targetDirectory")
-    val estimatingIndicator = estimatingProgressIndicatorFactory?.invoke(terminal)
-      ?: MordantEstimatingProgressIndicator(terminal = terminal)
-    val metadata = try {
-      metadataScanner.scan(targetDirectory) { filesScanned, bytesScanned ->
-        estimatingIndicator.onProgress(filesScanned, bytesScanned)
+    val metadata = if (noEstimate) {
+      null
+    } else {
+      val metadataScanner: DirectoryMetadataScanner = metadataScannerFactory?.invoke(threads)
+        ?: if (threads == 1 || effectiveScannerType.equals("sequential", ignoreCase = true)) {
+          FileTreeMetadataScanner
+        } else {
+          WorkStealingMetadataScanner(parallelism = threads)
+        }
+      val estimatingIndicator = estimatingProgressIndicatorFactory?.invoke(terminal)
+        ?: MordantEstimatingProgressIndicator(terminal = terminal)
+      try {
+        metadataScanner.scan(targetDirectory) { filesScanned, bytesScanned ->
+          estimatingIndicator.onProgress(filesScanned, bytesScanned)
+        }
+      } finally {
+        estimatingIndicator.finish()
       }
-    } finally {
-      estimatingIndicator.finish()
     }
 
     val existingEntries = if (continueId != null) {
@@ -254,15 +263,15 @@ class ScanCommand(
       val indicator = progressIndicatorFactory?.invoke(terminal)
         ?: MordantScanProgressIndicator(
           terminal = terminal,
-          totalFiles = metadata.fileCount,
-          totalBytes = metadata.totalBytes,
+          totalFiles = metadata?.fileCount,
+          totalBytes = metadata?.totalBytes,
           initialFiles = initialFiles,
           initialBytes = initialBytes
         )
       indicator.apply {
         setTotals(
-          totalFiles = metadata.fileCount,
-          totalBytes = metadata.totalBytes,
+          totalFiles = metadata?.fileCount,
+          totalBytes = metadata?.totalBytes,
           initialFiles = initialFiles,
           initialBytes = initialBytes
         )

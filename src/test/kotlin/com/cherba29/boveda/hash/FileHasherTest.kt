@@ -259,4 +259,30 @@ class FileHasherTest {
       dir.toFile().deleteRecursively()
     }
   }
+
+  @Test
+  fun `MessageDigestFileHasher validates bufferSize and safely reuses thread-local buffers`() {
+    assertFailsWith<IllegalArgumentException> {
+      MessageDigestFileHasher(bufferSize = 0)
+    }
+
+    val smallBufHasher = MessageDigestFileHasher(bufferSize = 64)
+    val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+    try {
+      val tasks = (1..20).map { i ->
+        java.util.concurrent.Callable {
+          val payload = "thread-safe-payload-$i-".repeat(20).toByteArray()
+          val expected = hasher.computeHash(ByteArrayInputStream(payload), "SHA-256")
+          val actual = smallBufHasher.computeHash(ByteArrayInputStream(payload), "SHA-256")
+          expected to actual
+        }
+      }
+      for (future in executor.invokeAll(tasks)) {
+        val (expected, actual) = future.get()
+        assertEquals(expected, actual)
+      }
+    } finally {
+      executor.shutdown()
+    }
+  }
 }

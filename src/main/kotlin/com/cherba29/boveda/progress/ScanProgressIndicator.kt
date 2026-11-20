@@ -192,13 +192,21 @@ class MordantScanProgressIndicator(
   totalBytes: Long? = null,
   initialFiles: Long = 0L,
   initialBytes: Long = 0L,
-  private val timeProvider: () -> Long = { System.nanoTime() }
+  private val timeProvider: () -> Long = { System.nanoTime() },
+  updateIntervalMillis: Long = DEFAULT_UPDATE_INTERVAL_MILLIS
 ) : ScanProgressIndicator {
+
+  companion object {
+    const val DEFAULT_UPDATE_INTERVAL_MILLIS = 100L
+  }
+
   private val filesCount = AtomicLong(initialFiles)
   private val bytesCount = AtomicLong(initialBytes)
   private val totalFilesRef = AtomicReference<Long?>(totalFiles)
   private val totalBytesRef = AtomicReference<Long?>(totalBytes)
   private val startNanos = timeProvider()
+  private val lastUpdateNanos = AtomicLong(0L)
+  private val updateIntervalNanos = updateIntervalMillis * 1_000_000L
   private val finished = AtomicBoolean(false)
 
   private val isInteractive: Boolean = terminal.terminalInfo.outputInteractive
@@ -286,26 +294,36 @@ class MordantScanProgressIndicator(
     val bytes = bytesCount.addAndGet(file.size)
 
     if (isInteractive) {
-      val tBytes = totalBytesRef.get()
-      val tFiles = totalFilesRef.get()
-      val (currentCompleted, currentTotal) = when {
-        tBytes != null && tBytes > 0L -> bytes to tBytes
-        tFiles != null && tFiles > 0L -> count to tFiles
-        else -> bytes to null
+      val shouldUpdate = if (updateIntervalNanos <= 0L) {
+        true
+      } else {
+        val now = timeProvider()
+        val last = lastUpdateNanos.get()
+        (last == 0L || now - last >= updateIntervalNanos) &&
+          lastUpdateNanos.compareAndSet(last, now)
       }
+      if (shouldUpdate) {
+        val tBytes = totalBytesRef.get()
+        val tFiles = totalFilesRef.get()
+        val (currentCompleted, currentTotal) = when {
+          tBytes != null && tBytes > 0L -> bytes to tBytes
+          tFiles != null && tFiles > 0L -> count to tFiles
+          else -> bytes to null
+        }
 
-      animator?.update {
-        context = ScanProgressState(
-          filesProcessed = count,
-          bytesProcessed = bytes,
-          totalFiles = tFiles,
-          totalBytes = tBytes,
-          startTimeNanos = startNanos,
-          action = "Scanning & ingesting:",
-          timeProvider = timeProvider
-        )
-        completed = currentCompleted
-        total = currentTotal
+        animator?.update {
+          context = ScanProgressState(
+            filesProcessed = count,
+            bytesProcessed = bytes,
+            totalFiles = tFiles,
+            totalBytes = tBytes,
+            startTimeNanos = startNanos,
+            action = "Scanning & ingesting:",
+            timeProvider = timeProvider
+          )
+          completed = currentCompleted
+          total = currentTotal
+        }
       }
     }
   }

@@ -1,11 +1,12 @@
 package com.cherba29.boveda.cache
 
 import com.cherba29.boveda.db.RepoFiles
-import java.util.concurrent.ConcurrentHashMap
+import com.google.common.cache.Cache
+import com.google.common.cache.CacheBuilder
 import java.util.concurrent.atomic.AtomicLong
 import org.jetbrains.exposed.v1.core.dao.id.EntityID
 import org.jetbrains.exposed.v1.jdbc.Database
-import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 /**
@@ -84,60 +85,88 @@ interface DeduplicationCache {
 }
 
 /**
- * Thread-safe in-memory implementation of [DeduplicationCache] backed by [ConcurrentHashMap].
+ * Thread-safe bounded in-memory implementation of [DeduplicationCache] backed by a Guava [Cache].
  *
- * @param initialCapacity Initial capacity for the underlying map.
+ * Uses size-based LRU eviction and stores raw primitive integer IDs to keep heap usage bounded
+ * even when scanning millions of unique files.
+ *
+ * @param initialCapacity Initial capacity for the underlying cache.
+ * @param maxSize Maximum number of `(size, hash) -> file_id` entries retained in memory.
  */
 class InMemoryDeduplicationCache(
-  initialCapacity: Int = 256
+  initialCapacity: Int = 256,
+  val maxSize: Long = DEFAULT_MAX_SIZE
 ) : DeduplicationCache {
 
-  private val map = ConcurrentHashMap<FileContentKey, EntityID<Int>>(initialCapacity)
+  companion object {
+    const val DEFAULT_MAX_SIZE = 250_000L
+  }
+
+  init {
+    require(initialCapacity >= 0) {
+      "initialCapacity must be non-negative, but was $initialCapacity"
+    }
+    require(maxSize >= 1L) { "maxSize must be at least 1, but was $maxSize" }
+  }
+
+  private val cache: Cache<FileContentKey, Int> = run {
+    val maxCap = maxSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    CacheBuilder.newBuilder()
+      .initialCapacity(initialCapacity.coerceAtMost(maxCap))
+      .maximumSize(maxSize)
+      .build()
+  }
   private val hits = AtomicLong(0)
   private val misses = AtomicLong(0)
 
   override fun get(size: Long, hash: String): EntityID<Int>? {
     val key = FileContentKey(size, hash)
-    val result = map[key]
+    val result = cache.getIfPresent(key)
     if (result != null) {
       hits.incrementAndGet()
+      return EntityID(result, RepoFiles)
     } else {
       misses.incrementAndGet()
+      return null
     }
-    return result
   }
 
   override fun peek(size: Long, hash: String): EntityID<Int>? {
-    return map[FileContentKey(size, hash)]
+    val result = cache.getIfPresent(FileContentKey(size, hash)) ?: return null
+    return EntityID(result, RepoFiles)
   }
 
   override fun put(size: Long, hash: String, id: EntityID<Int>) {
-    map[FileContentKey(size, hash)] = id
+    cache.put(FileContentKey(size, hash), id.value)
   }
 
   override fun contains(size: Long, hash: String): Boolean {
-    return map.containsKey(FileContentKey(size, hash))
+    return cache.asMap().containsKey(FileContentKey(size, hash))
   }
 
   override fun warmUp(database: Database): Int = transaction(database) {
     var count = 0
-    RepoFiles.selectAll().forEach { row ->
-      put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
-      count++
-    }
+    val limitCount = maxSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    RepoFiles.select(RepoFiles.id, RepoFiles.size, RepoFiles.hash)
+      .limit(limitCount)
+      .forEach { row ->
+        put(row[RepoFiles.size], row[RepoFiles.hash], row[RepoFiles.id])
+        count++
+      }
     count
   }
 
-  override fun size(): Int = map.size
+  override fun size(): Int = cache.size().toInt()
 
   override fun clear() {
-    map.clear()
+    cache.invalidateAll()
+    cache.cleanUp()
     hits.set(0)
     misses.set(0)
   }
 
   override fun getStatistics(): CacheStatistics = CacheStatistics(
-    size = map.size,
+    size = size(),
     hits = hits.get(),
     misses = misses.get()
   )

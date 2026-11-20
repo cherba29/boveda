@@ -57,6 +57,11 @@ dependencies {
 application {
   // Define the main class for the application.
   mainClass = "com.cherba29.boveda.MainKt"
+  applicationDefaultJvmArgs = listOf(
+    "-Xmx1g",
+    "-XX:MaxMetaspaceSize=128m",
+    "-Xss256k"
+  )
 }
 
 graalvmNative {

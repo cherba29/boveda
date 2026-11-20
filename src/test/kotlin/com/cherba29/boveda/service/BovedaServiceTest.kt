@@ -725,4 +725,42 @@ class BovedaServiceTest {
     assertEquals("hashSmall", nextLargest.hash)
     assertEquals(400L, nextLargest.wastedBytes)
   }
+
+  @Test
+  fun `recordBatch handles tiny bounded dedup and folder caches without eviction failures`() {
+    val db = DatabaseFactory.connectInMemory(
+      "bounded_cache_${UUID.randomUUID().toString().replace("-", "")}"
+    )
+    val tinyCache = com.cherba29.boveda.cache.InMemoryDeduplicationCache(maxSize = 2)
+    val service = BovedaService(
+      database = db,
+      batchSize = 10,
+      cache = tinyCache,
+      maxFolderCacheSize = 2
+    )
+    val snap = service.createSnapshot(Paths.get("/bounded"))
+
+    val batch1 = (1..8).map { i ->
+      ScannedFile(
+        path = Paths.get("/bounded/dir$i/file$i.txt"),
+        relativePath = "dir$i/file$i.txt",
+        size = (i * 100).toLong(),
+        hash = "hash-$i"
+      )
+    }
+    service.recordBatch(snap, batch1)
+
+    // Second batch repeats some hashes (evicted from tiny cache) and folders
+    val batch2 = listOf(
+      ScannedFile(Paths.get("/bounded/dir1/copy1.txt"), "dir1/copy1.txt", 100L, "hash-1"),
+      ScannedFile(Paths.get("/bounded/dir2/copy2.txt"), "dir2/copy2.txt", 200L, "hash-2")
+    )
+    service.recordBatch(snap, batch2)
+
+    transaction(db) {
+      assertEquals(8, RepoFile.all().count())
+      assertEquals(10, RepoFileInstance.all().count())
+    }
+    assertTrue(tinyCache.size() <= 2)
+  }
 }

@@ -50,6 +50,7 @@ class ScanTest {
     assertTrue(result.output.contains("--scanner"))
     assertTrue(result.output.contains("--work-stealing"))
     assertTrue(result.output.contains("--no-cache-warmup"))
+    assertTrue(result.output.contains("--no-estimate"))
     assertTrue(result.output.contains("--log-level"))
   }
 
@@ -504,6 +505,54 @@ class ScanTest {
 
       assertEquals(1, result.statusCode)
       assertTrue(result.output.contains("Invalid value for --max-hash-bytes"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command with --no-estimate skips metadata estimation pass`() {
+    val tempDir = Files.createTempDirectory("scan-no-estimate-dir")
+    val dbDir = Files.createTempDirectory("scan-no-estimate-db")
+    try {
+      tempDir.resolve("item.txt").writeText("no estimate content")
+      val dbFile = dbDir.resolve("no_est_db")
+
+      var metadataScannerInvoked = false
+      var configuredTotalFiles: Long? = -1L
+      var configuredTotalBytes: Long? = -1L
+
+      val mockMetadataScanner = object : DirectoryMetadataScanner {
+        override fun scan(rootPath: Path): DirectoryMetadata {
+          metadataScannerInvoked = true
+          return DirectoryMetadata(fileCount = 1L, totalBytes = 19L)
+        }
+      }
+
+      val mockIndicator = object : ScanProgressIndicator {
+        override fun setTotals(totalFiles: Long?, totalBytes: Long?) {
+          configuredTotalFiles = totalFiles
+          configuredTotalBytes = totalBytes
+        }
+
+        override fun onFileProcessed(file: ScannedFile) {}
+        override fun finish() {}
+      }
+
+      val command = ScanCommand(
+        progressIndicatorFactory = { mockIndicator },
+        metadataScannerFactory = { mockMetadataScanner }
+      )
+
+      val result = command.test(
+        listOf("--quiet", "--no-estimate", tempDir.toString(), dbFile.toString())
+      )
+
+      assertEquals(0, result.statusCode)
+      assertTrue(!metadataScannerInvoked, "Metadata scanner should not run with --no-estimate")
+      assertEquals(null, configuredTotalFiles)
+      assertEquals(null, configuredTotalBytes)
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

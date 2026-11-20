@@ -4,6 +4,7 @@ import com.cherba29.boveda.hash.FileHasher
 import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -200,6 +201,55 @@ class WorkStealingDirectoryScannerTest {
       assertEquals(1, results.size)
       assertEquals("keep.txt", results[0].relativePath)
       assertEquals(listOf("keep.txt"), hashedFiles)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan caps ForkJoinPool threads at parallelism under heavy queue backpressure`() {
+    val tempDir = Files.createTempDirectory("ws-backpressure-test")
+    try {
+      // Create nested directories with many files to force invokeAll + full resultQueue blocking
+      val totalFiles = 60
+      for (d in 1..10) {
+        val sub = tempDir.resolve("dir$d/nested$d").apply { createDirectories() }
+        for (f in 1..6) {
+          sub.resolve("file_$f.txt").writeText("content $d-$f")
+        }
+      }
+
+      val workerThreads = ConcurrentHashMap.newKeySet<String>()
+      val trackingHasher = object : FileHasher {
+        override fun computeHash(file: File, algorithm: String): String {
+          workerThreads.add(Thread.currentThread().name)
+          return "hash_${file.name}"
+        }
+
+        override fun computeHash(inputStream: InputStream, algorithm: String): String = "hash"
+      }
+
+      val parallelism = 3
+      val scanner = WorkStealingDirectoryScanner(
+        parallelism = parallelism,
+        hasher = trackingHasher,
+        queueCapacity = 2,
+        fileChunkSize = 1
+      )
+
+      val results = mutableListOf<ScannedFile>()
+      for (file in scanner.scan(tempDir)) {
+        // Simulate slower DB consumer so resultQueue stays full and triggers backpressure
+        Thread.sleep(2)
+        results.add(file)
+      }
+
+      assertEquals(totalFiles, results.size)
+      assertTrue(
+        workerThreads.size <= parallelism,
+        "Expected at most $parallelism worker threads, " +
+          "but saw ${workerThreads.size}: $workerThreads"
+      )
     } finally {
       tempDir.toFile().deleteRecursively()
     }
