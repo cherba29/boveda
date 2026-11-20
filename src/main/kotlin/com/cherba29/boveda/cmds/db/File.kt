@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds.db
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.cmds.db.file.DeleteCommand
+import com.cherba29.boveda.cmds.db.file.PrintDuplicatesCommand
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.service.BovedaService
@@ -12,12 +13,13 @@ import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.optional
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.choice
+import com.github.ajalt.clikt.parameters.types.int
 import com.github.ajalt.clikt.parameters.types.path
 import java.nio.file.Path
 import org.jetbrains.exposed.v1.jdbc.Database
 
 /**
- * Clikt subcommand for managing files in the database (e.g. delete).
+ * Clikt subcommand for managing and analyzing files in the database (print-duplicates, delete).
  */
 class FileCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null,
@@ -25,7 +27,8 @@ class FileCommand(
 ) : CliktCommand(
   name = "file"
 ) {
-  override fun help(context: Context): String = "Manage database files (delete)."
+  override fun help(context: Context): String =
+    "Manage and analyze database files (print-duplicates, delete)."
 
   val dbPath: Path? by argument(
     name = "DATABASE",
@@ -37,6 +40,12 @@ class FileCommand(
     "--db",
     help = "Path to persistent H2 database file."
   ).path(canBeFile = true, canBeDir = false)
+
+  val snapshotIdOption: Int? by option(
+    "-s",
+    "--snapshot",
+    help = "Optional snapshot ID to query. Defaults to the latest snapshot."
+  ).int()
 
   val logLevel: Level? by option(
     "-l",
@@ -55,6 +64,7 @@ class FileCommand(
 
   init {
     subcommands(
+      PrintDuplicatesCommand(serviceFactory),
       DeleteCommand(serviceFactory, selector)
     )
   }

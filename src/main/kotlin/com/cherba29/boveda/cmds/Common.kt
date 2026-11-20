@@ -64,6 +64,9 @@ fun resolveSnapshotId(context: Context, localSnapshotId: Int? = null): Int? {
   var current: Context? = context.parent
   while (current != null) {
     val cmd = current.command
+    if (cmd is com.cherba29.boveda.cmds.db.FileCommand) {
+      if (cmd.snapshotIdOption != null) return cmd.snapshotIdOption
+    }
     if (cmd is com.cherba29.boveda.cmds.db.FolderCommand) {
       if (cmd.snapshotIdOption != null) return cmd.snapshotIdOption
     }

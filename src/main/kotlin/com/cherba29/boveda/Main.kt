@@ -3,8 +3,8 @@ package com.cherba29.boveda
 import com.cherba29.boveda.cmds.BovedaCommand
 import com.cherba29.boveda.cmds.DbCommand
 import com.cherba29.boveda.cmds.ScanCommand
-import com.cherba29.boveda.cmds.db.PrintDuplicatesCommand
 import com.cherba29.boveda.cmds.db.SnapshotsCommand
+import com.cherba29.boveda.cmds.db.file.PrintDuplicatesCommand
 import com.cherba29.boveda.cmds.db.snapshots.DeleteCommand
 import com.cherba29.boveda.cmds.db.snapshots.DeleteSnapshotCommand
 import com.cherba29.boveda.cmds.db.snapshots.ListCommand
@@ -40,7 +40,10 @@ typealias DiscoveredFile = com.cherba29.boveda.scanner.DiscoveredFile
 typealias BovedaCommand = com.cherba29.boveda.cmds.BovedaCommand
 typealias ScanCommand = com.cherba29.boveda.cmds.ScanCommand
 typealias DbCommand = com.cherba29.boveda.cmds.DbCommand
-typealias PrintDuplicatesCommand = com.cherba29.boveda.cmds.db.PrintDuplicatesCommand
+typealias FileCommand = com.cherba29.boveda.cmds.db.FileCommand
+typealias FileDeleteCommand = com.cherba29.boveda.cmds.db.file.DeleteCommand
+typealias FilePrintDuplicatesCommand = com.cherba29.boveda.cmds.db.file.PrintDuplicatesCommand
+typealias PrintDuplicatesCommand = com.cherba29.boveda.cmds.db.file.PrintDuplicatesCommand
 typealias SnapshotsCommand = com.cherba29.boveda.cmds.db.SnapshotsCommand
 typealias ListCommand = com.cherba29.boveda.cmds.db.snapshots.ListCommand
 typealias ListSnapshotsCommand = com.cherba29.boveda.cmds.db.snapshots.ListSnapshotsCommand

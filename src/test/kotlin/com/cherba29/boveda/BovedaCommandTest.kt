@@ -58,11 +58,12 @@ class BovedaCommandTest {
     assertTrue(dbResult.output.contains("<database>"))
     assertTrue(dbResult.output.contains("--db"))
     assertTrue(dbResult.output.contains("--snapshot"))
-    assertTrue(dbResult.output.contains("print-duplicates"))
     assertTrue(dbResult.output.contains("snapshots"))
+    assertTrue(dbResult.output.contains("file"))
+    assertTrue(dbResult.output.contains("folder"))
 
-    // Test db print-duplicates help
-    val printDupResult = command.test(listOf("db", "print-duplicates", "--help"))
+    // Test db file print-duplicates help
+    val printDupResult = command.test(listOf("db", "file", "print-duplicates", "--help"))
     assertEquals(0, printDupResult.statusCode)
     assertTrue(printDupResult.output.contains("<database>"))
     assertTrue(printDupResult.output.contains("--db"))
@@ -416,7 +417,7 @@ class BovedaCommandTest {
   }
 
   @Test
-  fun `db print-duplicates subcommand queries latest snapshot and prints duplicate files and statistics`() {
+  fun `db file print-duplicates subcommand queries latest snapshot and prints duplicate files and statistics`() {
     val tempDir = Files.createTempDirectory("clikt-print-dups-test")
     val dbDir = Files.createTempDirectory("clikt-print-dups-db")
     try {
@@ -433,9 +434,9 @@ class BovedaCommandTest {
       )
       assertEquals(0, scanResult.statusCode)
 
-      // 2. Query duplicates using db print-duplicates --verbose (database on subcommand)
+      // 2. Query duplicates using db file print-duplicates --verbose (database on subcommand)
       val dupResult1 = command.test(
-        listOf("db", "print-duplicates", "--verbose", dbFile.toString())
+        listOf("db", "file", "print-duplicates", "--verbose", dbFile.toString())
       )
       assertEquals(0, dupResult1.statusCode)
       assertTrue(dupResult1.output.contains("### ==== Duplicate Files in DB ==== ###"))
@@ -448,9 +449,9 @@ class BovedaCommandTest {
       assertTrue(dupResult1.output.contains("Percentile Buckets by File Size (10% Deciles):"))
       assertTrue(dupResult1.output.contains("Total Processing Time:"))
 
-      // 3. Query duplicates using db <DATABASE> print-duplicates --verbose (database on parent command)
+      // 3. Query duplicates using db <DATABASE> file print-duplicates --verbose (database on parent command)
       val dupResult2 = command.test(
-        listOf("db", dbFile.toString(), "print-duplicates", "--verbose")
+        listOf("db", dbFile.toString(), "file", "print-duplicates", "--verbose")
       )
       assertEquals(0, dupResult2.statusCode)
       assertTrue(dupResult2.output.contains("### ==== Duplicate Files in DB ==== ###"))
@@ -459,7 +460,9 @@ class BovedaCommandTest {
       assertFalse(dupResult2.output.contains("f3.txt"))
 
       // 4. Query duplicates without --verbose (only summary and top 10, no individual duplicate file entries)
-      val dupResultDefault = command.test(listOf("db", "print-duplicates", dbFile.toString()))
+      val dupResultDefault = command.test(
+        listOf("db", "file", "print-duplicates", dbFile.toString())
+      )
       assertEquals(0, dupResultDefault.statusCode)
       assertFalse(dupResultDefault.output.contains("### ==== Duplicate Files in DB ==== ###"))
       assertFalse(dupResultDefault.output.contains("snapshot="))
@@ -472,7 +475,7 @@ class BovedaCommandTest {
   }
 
   @Test
-  fun `db print-duplicates with no duplicates reports no duplicates found`() {
+  fun `db file print-duplicates with no duplicates reports no duplicates found`() {
     val tempDir = Files.createTempDirectory("clikt-no-dup-test")
     val dbDir = Files.createTempDirectory("clikt-no-dup-db")
     try {
@@ -483,7 +486,7 @@ class BovedaCommandTest {
       val scanResult = command.test(listOf("scan", tempDir.toString(), dbFile.toString()))
       assertEquals(0, scanResult.statusCode)
 
-      val dupResult = command.test(listOf("db", "print-duplicates", dbFile.toString()))
+      val dupResult = command.test(listOf("db", "file", "print-duplicates", dbFile.toString()))
       assertEquals(0, dupResult.statusCode)
       assertTrue(dupResult.output.contains("No duplicates found."))
     } finally {

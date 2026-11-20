@@ -1,26 +1,25 @@
 # Boveda
 
-A vault of documents, images, and other files. Boveda scans directory hierarchies, computes cryptographic fingerprints, records file snapshots into an SQL database using [JetBrains Exposed](https://github.com/JetBrains/Exposed), and runs analytical queries such as content-based duplicate detection.
+A vault of documents, images, and other files. Boveda scans directory hierarchies, computes fast content fingerprints, records file and folder snapshots into an SQL database using [JetBrains Exposed](https://github.com/JetBrains/Exposed), and runs analytical queries such as file-level and folder-pair duplicate detection and interactive duplicate cleanup.
 
 ---
 
 ## Features
 
-- **Decoupled CLI Commands (`scan` and `db`)**: Clean separation between directory scanning / database population (`scan`) and offline analytical database querying (`db`, `db print-duplicates`).
-- **Resume Incomplete Scans (`scan --continue <snapshot_id>`)**: If a scan is interrupted or terminated midway, resume exactly where it left off using the snapshot ID. The directory path is retrieved directly from the snapshot, and files already processed with matching path, name, timestamp, and size are skipped without recomputing cryptographic hashes.
-- **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs.
-- **Multi-Threaded Producer-Consumer Pipeline**: Decouples directory walking (Stage 1), cryptographic hashing across worker thread pools (Stage 2), and database persistence (Stage 3) via bounded queues for maximum multi-core CPU utilization.
-- **Recursive Directory Scanner**: Traverses directory trees, filtering for regular files while recording relative paths, file sizes, and timestamps.
-- **Streaming File Hashing & Prefix-Only Option (`--max-hash-bytes`)**: Fast, chunk-based hashing (XXH3 default, MD5, SHA-256, SHA-512, etc.) that handles large files efficiently. Supports optional prefix hashing (`64Kb`, `128Kb`, `256Kb`, `512Kb`, `1Mb`, or full size) combined with file size for lightning-fast comparison of multi-gigabyte files.
-- **Content-Addressable Storage & In-Memory Deduplication Cache**: File content records (`RepoFiles`) are deduplicated by size and content hash, with separate instance records (`RepoFileInstances`) linking snapshots to files. An in-memory cache pre-warms known hashes and eliminates individual database lookups during ingestion.
-- **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default 1,000 files/transaction) and issues optimized SQL `batchInsert` operations, dramatically increasing scanning throughput.
-- **SQL Analytics & Duplicate Detection**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) to index and find identical files across snapshots.
-- **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status. Delete unneeded snapshots by ID with automatic cascade deletion of file instances and orphaned file metadata.
-- **Duplication & Storage Statistics with Mordant Table**: With `boveda db print-duplicates`, outputs a comprehensive statistical report including total files scanned/ingested, wasted duplicate storage, top 10 duplicate groups ordered by combined duplicate space, and a Mordant-rendered 10% percentile deciles table featuring total file size (`Size`) per decile and summed totals in the footer row.
-- **Mordant Progress Indicator**: During quiet scans (`--quiet`), displays a live animated Mordant progress bar showing processed file counts and real-time average ingestion speeds (files/second and megabytes/second).
-- **Rich CLI with Clikt**: Structured command-line interface with subcommands, path validation, custom hashing algorithm selection, quiet mode, persistent database options, and snapshot targeting.
-- **GraalVM Native Image Ready**: Configured with GraalVM Native Build Tools to compile into a fast, standalone native binary without JVM startup overhead.
-- **Flexible Storage**: Supports both in-memory H2 databases for transient runs and persistent file-backed databases (`.mv.db`) for long-term tracking.
+- **Decoupled CLI Commands (`scan` and `db`)**: Clean separation between directory scanning / database population (`scan`) and offline analytical database querying and cleanup (`db`, `db file print-duplicates`, `db file delete`, `db folder print-duplicates`, `db snapshots list`, `db snapshots delete`).
+- **Resume Incomplete Scans (`scan --continue <snapshot_id>`)**: If a scan is interrupted or terminated midway, resume where it left off using the snapshot ID. The root directory is retrieved directly from the snapshot, and files already processed with matching path, name, timestamp, and size are skipped without recomputing hashes.
+- **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a strictly bounded `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs without thread storms.
+- **Multi-Threaded Producer-Consumer Pipeline**: Optional producer-consumer strategy (`--scanner parallel`) decoupling directory walking (Stage 1), parallel hashing across a fixed worker pool (Stage 2), and database persistence (Stage 3) via bounded queues.
+- **Streaming File Hashing & Prefix-Only Option (`--max-hash-bytes`)**: Reusable 128 KB per-thread buffers with high-speed non-cryptographic (`XXH3` default, `XXH3_128`, `XXH64`, `XXH32`, `CRC32`, `CRC32C`) and cryptographic (`MD5`, `SHA-256`, `SHA-512`, etc.) hashing. Supports optional prefix hashing (`64Kb`, `128Kb`, `256Kb`, `512Kb`, `1Mb`, or `full`) combined with file size for rapid comparison of large files.
+- **Content-Addressable Storage & Bounded LRU Caches**: File content records (`files`) are deduplicated by `(size, hash)`, with folder aggregates (`folders`) and file instance records (`file_instances`) linking snapshots to files. Bounded Guava LRU caches (250k file content entries, 50k folder entries), a 16 MB H2 page cache limit, and default JVM memory limits (`-Xmx1g -XX:MaxMetaspaceSize=128m -Xss256k`, overridable via `BOVEDA_OPTS`) keep memory usage predictable on multi-million-file scans.
+- **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default `1000` files/transaction) and issues optimized SQL `batchInsert` operations.
+- **File-Level Duplication Statistics (`db file print-duplicates`)**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) and outputs a statistical report including total files/storage scanned, wasted duplicate storage, top 10 duplicate groups ordered by combined duplicate space, and a Mordant-rendered 10% percentile deciles table.
+- **Folder-Level Duplicate Analysis (`db folder print-duplicates`)**: Identifies top folder pairs sharing duplicate files, showing shared vs. differing file counts, duplicated storage percentages, and the largest duplicated files in each pair.
+- **Safe & Interactive Duplicate Deletion (`db file delete`)**: Delete a specific duplicate file from disk and database (refusing to delete unique files unless `--force` is passed) or launch an interactive terminal selector to reclaim space starting from the largest duplicate groups.
+- **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status, or delete snapshots with automatic cascade cleanup of orphaned records.
+- **Pre-Scan Estimation & Live Mordant Progress Bar**: Displays an animated estimation spinner before scanning (skippable via `--no-estimate`) and, during `--quiet` scans, a throttled Mordant progress bar showing percentage, ETA, processed file counts, and live ingestion speeds (files/s and MB/s).
+- **Rich CLI with Clikt & GraalVM Native Image Ready**: Structured subcommand CLI with path validation, runtime log-level control, and GraalVM Native Image metadata for compiling a standalone native binary.
+- **Flexible Storage**: Supports both in-memory H2 databases (for tests) and persistent file-backed H2 databases (`.mv.db`).
 
 ---
 
@@ -33,7 +32,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 
 ## Installation & Build
 
-Build the project and run the test suite:
+Build the project, run verification checks, or install the runnable distribution:
 
 ```bash
 # Build the project
@@ -42,16 +41,21 @@ Build the project and run the test suite:
 # Run unit and integration tests
 ./gradlew test
 
-# Run verification and Kover code coverage checks
+# Run ktlint, tests, and Kover code coverage checks
 ./gradlew check
+
+# Build the runnable CLI distribution under build/install/boveda/
+./gradlew installDist
+./build/install/boveda/bin/boveda --help
+
+# Override JVM memory limits at runtime via BOVEDA_OPTS (default: -Xmx1g -XX:MaxMetaspaceSize=128m -Xss256k)
+BOVEDA_OPTS="-Xmx512m" ./build/install/boveda/bin/boveda scan /path/to/dir /tmp/vault.db --quiet
 
 # Build standalone GraalVM Native Image executable
 ./gradlew nativeCompile
-
-# Run the compiled native binary directly
 ./build/native/nativeCompile/boveda --help
 
-# Or compile and run directly with Gradle
+# Or compile and run native image directly with Gradle
 ./gradlew nativeRun --args="--help"
 ```
 
@@ -59,7 +63,7 @@ Build the project and run the test suite:
 
 ## CLI Structure & Usage
 
-Boveda provides two main subcommands: **`scan`** and **`db`** (with nested **`print-duplicates`**).
+Boveda provides two top-level subcommands: **`scan`** and **`db`** (which organizes offline operations under **`file`**, **`folder`**, and **`snapshots`**).
 
 ```text
 Usage: boveda [<options>] <command> [<args>]...
@@ -79,7 +83,7 @@ Commands:
 
 ### 1. `scan` Subcommand
 
-Scans a directory tree, computes file content hashes, and populates the target database with a new snapshot:
+Scans a directory tree, computes file content hashes, and populates the target database with a new (or resumed) snapshot:
 
 ```text
 Usage: boveda scan [<options>] [<directory>] [<database>]
@@ -87,18 +91,31 @@ Usage: boveda scan [<options>] [<directory>] [<database>]
   Scan directory and populate the target database with file fingerprints.
 
 Options:
-  -c, --continue=<int>    Resume an incomplete directory scan for the given snapshot ID.
+  -c, --continue=<int>    Resume an incomplete directory scan for the given
+                          snapshot ID.
   -d, --db=<path>         Target database file path.
-  -a, --algorithm=<text>  File hashing algorithm (e.g. XXH3, CRC32, MD5, SHA-256, SHA-512). Default is XXH3.
-  -m, --max-hash-bytes=<size>
-                          Maximum initial bytes to hash per file as well as file size (e.g. 64Kb, 128Kb, 256Kb, 512Kb, 1Mb, full). Default is full file.
-  -q, --quiet             Suppress per-file progress output during directory scan.
-  -b, --batch-size=<int>  Number of files to batch per database transaction during scanning. Default is 1000.
-  -t, --threads=<int>     Number of worker threads for parallel file hashing (defaults to available CPU cores).
+  -a, --algorithm=<text>  File hashing algorithm (e.g. XXH3, CRC32, MD5,
+                          SHA-256, SHA-512). Default is XXH3.
+  -m, --max-hash-bytes, --max-hash-size, --hash-prefix-size, --hash-bytes=<text>
+                          Maximum initial bytes to hash per file as well as the
+                          file size (e.g. 64Kb, 128Kb, 256Kb, 512Kb, 1Mb, full).
+                          Default is full file.
+  -q, --quiet             Suppress per-file progress output during directory
+                          scan.
+  -b, --batch-size=<int>  Number of files to batch per database transaction
+                          during scanning. Default is 1000.
+  -t, --threads=<int>     Number of worker threads for parallel file hashing
+                          (defaults to available CPU cores, capped at 8).
   -s, --scanner=(work-stealing|parallel|sequential)
-                          Directory scanner strategy: 'work-stealing' (default), 'parallel', or 'sequential'.
-  --work-stealing         Enable work-stealing parallel directory traversal using ForkJoinPool.
-  --no-cache-warmup       Disable pre-warming the in-memory deduplication cache from the database on startup.
+                          Directory scanner strategy: 'work-stealing' (default),
+                          'parallel' (producer-consumer pipeline), or
+                          'sequential'.
+  --work-stealing         Enable work-stealing parallel directory traversal
+                          using ForkJoinPool.
+  --no-cache-warmup       Disable pre-warming the in-memory deduplication cache
+                          from the database on startup.
+  --no-estimate           Skip the initial directory traversal that estimates
+                          total file count and size.
   -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
                           Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
   -h, --help              Show this message and exit
@@ -118,7 +135,7 @@ For the full empirical benchmark report across large files (100 MB – 1 GB) and
 | **Terabyte-Scale Storage / Large Media & ISOs** | `boveda scan --max-hash-bytes 1Mb <dir> <db>` | **~500x speedup** on large files (1 GB hashed in **0.69 ms**). Combines the first 1 MB prefix with the exact file size to eliminate disk read bottlenecks. |
 | **Safe Deletion Workflows (`db file delete`)** | `boveda scan --algorithm XXH3 <dir> <db>` *(Full hashing, omit `--max-hash-bytes`)* | Full content hashing ensures distinct files sharing identical headers or sizes are never falsely matched. **Never use CRC32 for deletion.** |
 | **Cloud / Amazon S3 / Legacy Manifests** | `boveda scan --algorithm MD5 <dir> <db>` | Generates 128-bit MD5 hex digests matching Amazon S3 ETags, `rsync --checksum`, and `md5sum` registries. |
-| **Low-Power / Battery-Constrained Devices** | `boveda scan --max-hash-bytes 64Kb <dir> <db>` *(or `--algorithm CRC32`)* | Minimizes storage I/O and CPU compute cycles, preserving battery and preventing thermal throttling on NAS/Raspberry Pi. |
+| **Low-Power / Memory-Constrained / WSL2 Large Trees** | `BOVEDA_OPTS="-Xmx512m" boveda scan --no-estimate --max-hash-bytes 64Kb <dir> <db>` | Skips the double-walk estimation pass, minimizes I/O and CPU cycles, and bounds JVM memory cleanly. |
 
 > [!WARNING]
 > **Why CRC32 must NEVER be used for deletion workflows:**
@@ -126,7 +143,7 @@ For the full empirical benchmark report across large files (100 MB – 1 GB) and
 
 ### 2. `db` Subcommand
 
-Queries an existing/computed database without scanning the filesystem. If invoked without a nested subcommand, it prints all recorded file records from the latest snapshot:
+Queries an existing database without scanning the filesystem. If invoked without a nested subcommand, it prints all recorded file records from the latest snapshot. The `<database>` path and `--snapshot` option can be provided either on `db` (or `db file` / `db folder`) or on the leaf subcommand:
 
 ```text
 Usage: boveda db [<options>] [<database>] <command> [<args>]...
@@ -135,7 +152,8 @@ Usage: boveda db [<options>] [<database>] <command> [<args>]...
 
 Options:
   -d, --db=<path>       Path to persistent H2 database file.
-  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest snapshot.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest
+                        snapshot.
   -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
                         Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
   -h, --help            Show this message and exit
@@ -144,25 +162,27 @@ Arguments:
   <database>  Path to persistent H2 database file.
 
 Commands:
-  file              Manage files in the database (delete duplicates).
-  print-duplicates  Query the provided database for the latest snapshot and print duplicate files and statistics.
-  snapshots         Manage database snapshots (list, delete).
+  snapshots  Manage database snapshots (list, delete).
+  file       Manage and analyze database files (print-duplicates, delete).
+  folder     Manage and analyze folders in the database.
 ```
 
-### 3. `db print-duplicates` Subcommand
+### 3. `db file print-duplicates` Subcommand
 
 Queries the database for duplicate files (files sharing identical content hashes within a snapshot) and prints duplication overview metrics, the top 10 duplicate groups ordered by combined duplicate space, and a Mordant percentile decile table:
 
 ```text
-Usage: boveda db print-duplicates [<options>] [<database>]
-# or: boveda db [<database>] print-duplicates [<options>]
+Usage: boveda db file print-duplicates [<options>] [<database>]
+# or: boveda db [<database>] file print-duplicates [<options>]
 
-  Query the provided database for the latest snapshot and print duplicate files and statistics.
+  Query the provided database for the latest snapshot and print duplicate files
+  and statistics.
 
 Options:
-  -v, --verbose         Print every duplicate file entry found in the database.
   -d, --db=<path>       Path to persistent H2 database file.
-  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest snapshot.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest
+                        snapshot.
+  -v, --verbose         Print every duplicate file entry found in the database.
   -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
                         Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
   -h, --help            Show this message and exit
@@ -171,7 +191,62 @@ Arguments:
   <database>  Path to persistent H2 database file.
 ```
 
-### 4. `db snapshots list` Subcommand
+### 4. `db file delete` Subcommand
+
+Deletes duplicate files from both disk and the database snapshot, automatically cleaning up orphaned CAS records when all references to a file's content are removed:
+
+- **Single-File Mode**: If a file path is specified, deletes it from disk and database, but only if duplicate copies exist (or if `--force` is specified).
+- **Interactive Mode**: If no file path is specified, finds the duplicate group wasting the most storage and provides an interactive terminal multi-select prompt (<kbd>↑</kbd>/<kbd>↓</kbd> navigate, <kbd>Space</kbd>/<kbd>x</kbd> toggle, <kbd>a</kbd> toggle all, <kbd>Enter</kbd> delete selected, <kbd>Esc</kbd> quit), looping to the next largest group until resolved or exited.
+
+```text
+Usage: boveda db file delete [<options>] [<file>] [<database>]
+# or: boveda db [<database>] file delete [<file>] [<options>]
+
+  Delete duplicate files from the filesystem and database.
+
+Options:
+  -f, --file=<path>     Path to file to delete.
+  -d, --db=<path>       Path to persistent H2 database file.
+  --force               Force deletion of file even if it does not have
+                        duplicates.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest
+                        snapshot.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                        Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help            Show this message and exit
+
+Arguments:
+  <file>      Path to file to delete (optional; if omitted, starts interactive
+              duplicate deletion).
+  <database>  Path to persistent H2 database file.
+```
+
+### 5. `db folder print-duplicates` Subcommand
+
+Finds the top folder pairs sharing the most duplicated content within a snapshot, reporting shared/different file counts, duplicate storage share percentages, and up to the top 3 largest duplicate files per pair:
+
+```text
+Usage: boveda db folder print-duplicates [<options>] [<database>]
+# or: boveda db [<database>] folder print-duplicates [<options>]
+
+  Show top folder pairs with most duplicate files between them and duplicate
+  statistics.
+
+Options:
+  -d, --db=<path>       Path to persistent H2 database file.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest
+                        snapshot.
+  -n, --limit=<int>     Number of top duplicate folder pairs to show. Default is
+                        10.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                        Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help            Show this message and exit
+
+Arguments:
+  <database>  Path to persistent H2 database file.
+```
+
+### 6. `db snapshots list` Subcommand
 
 Lists all recorded snapshots in the database in a formatted table showing snapshot ID, root path, file count, total storage size, and completion status:
 
@@ -191,9 +266,9 @@ Arguments:
   <database>  Path to persistent H2 database file.
 ```
 
-### 5. `db snapshots delete` Subcommand
+### 7. `db snapshots delete` Subcommand
 
-Deletes a chosen snapshot by its snapshot ID from the database, cascading to remove its file instances and any orphaned files no longer referenced by other snapshots:
+Deletes a snapshot by its ID from the database, cascading to remove its folders, file instances, and any orphaned content records no longer referenced by other snapshots:
 
 ```text
 Usage: boveda db snapshots delete [<options>] <snapshot_id> [<database>]
@@ -212,36 +287,11 @@ Arguments:
   <database>     Path to persistent H2 database file.
 ```
 
-### 6. `db file delete` Subcommand
-
-Deletes duplicate files from both disk and the database snapshot, automatically cleaning up orphaned CAS records when all references to a file's content are removed:
-
-* **Single-File Mode**: If a file path is specified, deletes it from disk and database, but only if duplicate copies exist (or if `--force` is specified).
-* **Interactive Mode**: If no file path is specified, finds the duplicate group wasting the most storage and provides an interactive terminal multi-select prompt (<kbd>↑</kbd>/<kbd>↓</kbd> navigate, <kbd>Space</kbd>/<kbd>x</kbd> toggle, <kbd>a</kbd> toggle all, <kbd>Enter</kbd> delete selected, <kbd>Esc</kbd> quit), looping to find the next largest group until resolved or exited.
-
-```text
-Usage: boveda db file delete [<options>] [<file>] [<database>]
-# or: boveda db [<database>] file delete [<file>] [<options>]
-
-  Delete duplicate files from disk and the database snapshot.
-
-Options:
-  -f, --file=<path>     Path of the file to delete from disk and database.
-  -d, --db=<path>       Path to persistent H2 database file.
-  --force               Force deletion of file even if it has no duplicates.
-  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest snapshot.
-  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
-                        Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
-  -h, --help            Show this message and exit
-
-Arguments:
-  <file>      Optional path of the file to delete. If omitted, starts interactive duplicate selector.
-  <database>  Path to persistent H2 database file.
-```
-
 ---
 
 ## Examples
+
+*(Examples below use `./gradlew run --args="..."`; after `./gradlew installDist`, you can invoke `./build/install/boveda/bin/boveda ...` directly.)*
 
 ### 1. Scan a Directory and Populate a Database
 Scan `/path/to/my/documents` and record all file fingerprints into `/tmp/vault.db`:
@@ -251,35 +301,44 @@ Scan `/path/to/my/documents` and record all file fingerprints into `/tmp/vault.d
 *(Creates the H2 database file at `/tmp/vault.db.mv.db`.)*
 
 ### 2. Quiet Scan with Live Progress Indicator
-Suppress per-file terminal output and show an animated Mordant progress bar showing files processed and real-time ingestion speeds:
+Suppress per-file terminal output and display an animated Mordant progress bar with percentage, ETA, and real-time ingestion speeds:
 ```bash
 ./gradlew run --args="scan --quiet /path/to/my/documents /tmp/vault.db"
+
+# Skip initial metadata estimation pass on very large directory trees
+./gradlew run --args="scan --quiet --no-estimate /path/to/my/documents /tmp/vault.db"
 ```
 During scanning:
 ```text
-⠋ Scanning & ingesting: 1,420 files (115.4 files/s, 24.50 MB/s) 0:00:12
+⠋ Scanning & ingesting: ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 1,420 / 1,420 files (115.4 files/s, 24.50 MB/s) eta 00:00 0:00:12
 ```
 On completion:
 ```text
 ✔ Scanned 1,420 files (450.20 MB) in 12.30s (115.4 files/s, 24.50 MB/s)
 ```
 
-### 3. Query All Files in an Existing Database
+### 3. Resume an Interrupted Scan
+If a scan was stopped before completion, check its ID with `db snapshots list` and resume it:
+```bash
+./gradlew run --args="scan --continue 1 --quiet /tmp/vault.db"
+```
+
+### 4. Query All Files in an Existing Database
 Query the latest snapshot in `/tmp/vault.db` without re-scanning the filesystem:
 ```bash
 ./gradlew run --args="db /tmp/vault.db"
 ```
 
-### 4. Query Duplicate Files & Duplication Statistics Report
+### 5. Query Duplicate Files & Duplication Statistics Report
 Analyze the latest snapshot in `/tmp/vault.db` for duplicate files and storage waste:
 ```bash
 # Default: prints top 10 duplicate groups and summary deciles table
-./gradlew run --args="db print-duplicates /tmp/vault.db"
+./gradlew run --args="db file print-duplicates /tmp/vault.db"
 # or equivalently:
-./gradlew run --args="db /tmp/vault.db print-duplicates"
+./gradlew run --args="db /tmp/vault.db file print-duplicates"
 
 # Verbose: also print every individual duplicate file entry in the database
-./gradlew run --args="db print-duplicates --verbose /tmp/vault.db"
+./gradlew run --args="db file print-duplicates --verbose /tmp/vault.db"
 ```
 
 Example report output:
@@ -341,7 +400,30 @@ Total Wasted Storage: 89.06 MB (93,382,389 bytes)
 ================================================================================
 ```
 
-### 5. Hashing Algorithms (XXH3, CRC32, MD5, SHA-256)
+### 6. Find Top Duplicate Folder Pairs
+Identify directories containing overlapping duplicate copies:
+```bash
+# Default: top 10 folder pairs
+./gradlew run --args="db folder print-duplicates /tmp/vault.db"
+
+# Custom limit
+./gradlew run --args="db folder print-duplicates --limit 5 /tmp/vault.db"
+```
+
+### 7. Delete Duplicate Files from Disk and Database (`db file delete`)
+Delete a specific duplicate file or use the interactive terminal prompt to reclaim space from the largest duplicate groups:
+```bash
+# Delete a specific duplicate file (fails if it has no duplicates, unless --force is given)
+./gradlew run --args="db file delete /data/backup/video1.mp4 /tmp/vault.db"
+
+# Force deletion of any file regardless of duplicate status
+./gradlew run --args="db file delete --force /data/backup/old.log /tmp/vault.db"
+
+# Interactive deletion: prompts to select and delete duplicates from the group wasting the most space
+./gradlew run --args="db file delete /tmp/vault.db"
+```
+
+### 8. Hashing Algorithms (`XXH3`, `CRC32`, `MD5`, `SHA-256`)
 Specify a non-cryptographic or cryptographic hashing algorithm:
 ```bash
 # High-performance default non-cryptographic hash (2.7–3.0 GB/s on NVMe)
@@ -357,7 +439,7 @@ Specify a non-cryptographic or cryptographic hashing algorithm:
 ./gradlew run --args="scan --algorithm SHA-256 /path/to/my/documents /tmp/vault.db"
 ```
 
-### 6. Fast Prefix Hashing on Large Files (`--max-hash-bytes`)
+### 9. Fast Prefix Hashing on Large Files (`--max-hash-bytes`)
 Accelerate scanning of large media, video libraries, and archives by hashing only an initial prefix combined with the exact file size (up to 500x speedup):
 ```bash
 # Hash only the first 1 MB per file (combines 1 MB prefix + total file size)
@@ -367,51 +449,58 @@ Accelerate scanning of large media, video libraries, and archives by hashing onl
 ./gradlew run --args="scan --max-hash-bytes 64Kb /mnt/nas/media /tmp/vault.db"
 ```
 
-### 7. Multi-Threaded Parallel & Work-Stealing Traversal
+### 10. Multi-Threaded Parallel & Work-Stealing Traversal
 Configure worker thread pools and directory exploration strategy:
 ```bash
-# Work-stealing ForkJoinPool scanner with 8 threads (default)
+# Work-stealing ForkJoinPool scanner with 8 threads (default, capped at 8)
 ./gradlew run --args="scan --threads 8 --work-stealing /path/to/my/documents /tmp/vault.db"
 
 # Producer-consumer pipeline scanner
-./gradlew run --args="scan --scanner parallel --threads 8 /path/to/my/documents /tmp/vault.db"
+./gradlew run --args="scan --scanner parallel --threads 4 /path/to/my/documents /tmp/vault.db"
 
 # Sequential scanner for rotational hard drives
 ./gradlew run --args="scan --scanner sequential /path/to/my/documents /tmp/vault.db"
 ```
 
-### 8. High-Throughput Batch Ingestion & Cache Tuning
-Tune database batch transaction sizes and cache warm-up:
+### 11. High-Throughput Batch Ingestion, Cache & Memory Tuning
+Tune database batch transaction sizes, cache warm-up, and JVM memory limits:
 ```bash
 # Ingest in batches of 2,000 files
 ./gradlew run --args="scan --batch-size 2000 /path/to/my/documents /tmp/vault.db"
 
 # Disable cache pre-warming on memory-constrained systems
 ./gradlew run --args="scan --no-cache-warmup /path/to/my/documents /tmp/vault.db"
+
+# Cap heap to 512 MB when running the installed CLI distribution
+BOVEDA_OPTS="-Xmx512m" ./build/install/boveda/bin/boveda scan --quiet --no-estimate "$HOME" /tmp/vault.db
 ```
 
-### 9. Query a Specific Snapshot by ID
+### 12. Query a Specific Snapshot by ID
 Query a historical snapshot rather than the default latest snapshot:
 ```bash
 ./gradlew run --args="db --snapshot 2 /tmp/vault.db"
-./gradlew run --args="db print-duplicates --snapshot 2 /tmp/vault.db"
+./gradlew run --args="db file print-duplicates --snapshot 2 /tmp/vault.db"
+./gradlew run --args="db folder print-duplicates --snapshot 2 /tmp/vault.db"
 ```
 
-### 10. Enable Debug SQL Query Logging
+### 13. Enable Debug SQL Query Logging
 Direct SQL query execution logs to stderr by setting `--log-level=DEBUG`:
 ```bash
 ./gradlew run --args="-l DEBUG scan /path/to/my/documents /tmp/vault.db"
 ```
 
-### 11. List Existing Database Snapshots
-List all recorded snapshots with root directory path, total file counts, storage size, and completion status:
+### 14. List & Delete Database Snapshots
 ```bash
+# List all recorded snapshots
 ./gradlew run --args="db snapshots list /tmp/vault.db"
 # or equivalently:
 ./gradlew run --args="db /tmp/vault.db snapshots list"
+
+# Delete snapshot 1 and clean up orphaned file records
+./gradlew run --args="db snapshots delete 1 /tmp/vault.db"
 ```
 
-Example output:
+Example `db snapshots list` output:
 ```text
 ┌────┬──────────────┬─────────┬────────────┬───────────┐
 │ ID │ Root Path    │   Files │ Total Size │  Status   │
@@ -419,32 +508,6 @@ Example output:
 │  1 │ /data/vault1 │   4,142 │  130.56 MB │ Completed │
 │  2 │ /data/vault2 │     512 │   15.20 MB │ Completed │
 └────┴──────────────┴─────────┴────────────┴───────────┘
-```
-
-### 12. Delete a Snapshot by Snapshot ID
-Delete a specific snapshot by its ID, cleaning up its file instances and any orphaned files:
-```bash
-./gradlew run --args="db snapshots delete 1 /tmp/vault.db"
-# or equivalently:
-./gradlew run --args="db /tmp/vault.db snapshots delete 1"
-```
-
-Example output:
-```text
-Snapshot 1 deleted successfully.
-```
-
-### 13. Delete Duplicate Files from Disk and Database (`db file delete`)
-Delete a specific duplicate file or use the interactive terminal prompt to reclaim space from the largest duplicate groups:
-```bash
-# Delete a specific duplicate file (fails if it has no duplicates, unless --force is given)
-./gradlew run --args="db file delete /data/backup/video1.mp4 /tmp/vault.db"
-
-# Force deletion of any file regardless of duplicate status
-./gradlew run --args="db file delete --force /data/backup/old.log /tmp/vault.db"
-
-# Interactive deletion: prompts to select and delete duplicates from the group wasting the most space
-./gradlew run --args="db file delete /tmp/vault.db"
 ```
 
 ---
@@ -455,45 +518,55 @@ Boveda supports both work-stealing tree traversal and producer-consumer pipelini
 
 ```mermaid
 flowchart TD
-    subgraph WorkStealing["Work-Stealing Directory Scanner (Option 4)"]
-        WS_Pool["ForkJoinPool\n(Work-Stealing Worker Deques)"]
-        DirTask["ScanDirectoryTask\n(Forks Subdirectory Tasks)"]
-        HashTask["HashFilesTask\n(Forks File Hash Tasks)"]
+    subgraph WorkStealing["Work-Stealing Directory Scanner (Default)"]
+        WS_Pool["Bounded ForkJoinPool\n(Work-Stealing Worker Deques)"]
+        DirTask["ScanDirectoryTask\n(Forks Hash & Subdirectory Tasks)"]
+        HashTask["HashFilesTask\n(128 KB ThreadLocal Buffers)"]
         WS_Pool --- DirTask
         WS_Pool --- HashTask
     end
 
-    subgraph Pipeline["Producer-Consumer Pipeline (Option 1)"]
+    subgraph Pipeline["Producer-Consumer Pipeline (--scanner parallel)"]
         Walker["Producer Thread\n(Path.walk)"]
         WorkQ["Bounded Work Queue"]
-        WorkerPool["Hash Worker Pool\n(N Threads)"]
+        WorkerPool["Fixed Hash Worker Pool\n(N Threads)"]
         Walker --> WorkQ --> WorkerPool
     end
 
     WorkStealing --> ResultQ["Bounded Result Queue\n(ScannedFile records)"]
     Pipeline --> ResultQ
-    ResultQ --> Consumer["Batch DB Inserter\n(In-Memory CAS Cache + batchInsert)"]
+    ResultQ --> Consumer["Batch DB Inserter\n(Bounded Guava LRU Caches + batchInsert)"]
 ```
 
-1. **Work-Stealing Scanner ([WorkStealingDirectoryScanner](src/main/kotlin/com/cherba29/boveda/scanner/WorkStealingDirectoryScanner.kt))**: Recursively splits directory exploration and file hashing into fine-grained tasks in a `ForkJoinPool`. Idle threads steal directory branches or file chunks, maximizing throughput on deep hierarchies and fast NVMe storage.
-2. **Producer-Consumer Pipeline ([ParallelDirectoryScanner](src/main/kotlin/com/cherba29/boveda/scanner/ParallelDirectoryScanner.kt))**: Emits files from a single discovery thread into a bounded queue drained by a dedicated worker pool.
-3. **Batch Persistence ([BovedaService](src/main/kotlin/com/cherba29/boveda/service/BovedaService.kt))**: Drains records, resolves duplicates against the in-memory cache, and batch inserts records in single transactions.
+1. **Work-Stealing Scanner ([WorkStealingDirectoryScanner](src/main/kotlin/com/cherba29/boveda/scanner/WorkStealingDirectoryScanner.kt))**: Recursively splits directory exploration and file hashing into fine-grained tasks in a strictly thread-bounded `ForkJoinPool`. Hashing tasks execute immediately while idle threads steal subdirectory branches from the deque base.
+2. **Producer-Consumer Pipeline ([ParallelDirectoryScanner](src/main/kotlin/com/cherba29/boveda/scanner/ParallelDirectoryScanner.kt))**: Emits files from a single discovery thread into a bounded queue drained by a fixed-size worker pool.
+3. **Batch Persistence ([BovedaService](src/main/kotlin/com/cherba29/boveda/service/BovedaService.kt))**: Drains records, resolves content and folder IDs against bounded Guava LRU caches (with transaction-local maps preventing mid-batch eviction issues), and batch inserts records in single transactions.
 
 ---
 
 ## Database Schema
 
-Boveda uses Exposed to manage an H2 relational schema:
+Boveda uses Exposed to manage an H2 relational schema with four tables:
 
 ```mermaid
 erDiagram
+    SNAPSHOTS ||--o{ FOLDERS : contains
     SNAPSHOTS ||--o{ FILE_INSTANCES : contains
+    FOLDERS ||--o{ FILE_INSTANCES : groups
     FILES ||--o{ FILE_INSTANCES : referenced_by
 
     SNAPSHOTS {
         int id PK
         varchar root_path
         boolean completed
+    }
+
+    FOLDERS {
+        int id PK
+        int snapshot_id FK
+        varchar path
+        int file_count
+        bigint total_bytes
     }
 
     FILES {
@@ -505,14 +578,17 @@ erDiagram
     FILE_INSTANCES {
         int id PK
         int snapshot_id FK
+        int folder_id FK
         int file_id FK
         varchar path
+        bigint timestamp
     }
 ```
 
-- **`snapshots`**: Records each scan run with root path and completion status.
-- **`files`**: Stores distinct file payloads identified by `(size, hash)`. Identical files across paths share a single `files` entry.
-- **`file_instances`**: Links a snapshot and a file path to its corresponding content record in `files`.
+- **`snapshots`**: Records each scan run with its root path and completion status.
+- **`folders`**: Stores normalized folder paths per snapshot along with aggregate unique file counts and byte totals updated on snapshot completion.
+- **`files`**: Stores distinct file payloads identified by `(size, hash)`. Identical files across paths and snapshots share a single `files` entry.
+- **`file_instances`**: Links a snapshot, folder, and normalized file path (plus optional modification timestamp) to its content record in `files`.
 
 ---
 
@@ -521,35 +597,54 @@ erDiagram
 ```text
 src/main/
 ├── resources/
-│   ├── logback.xml                         # Logback configuration directing WARN/ERROR logs to stderr
-│   └── META-INF/native-image/
-│       ├── reflect-config.json             # GraalVM reflection metadata for Exposed DAO & column types
-│       └── proxy-config.json               # Dynamic proxy configuration for Native Image
+│   ├── logback.xml                                  # Logback configuration directing WARN/ERROR logs to stderr
+│   └── META-INF/native-image/                       # GraalVM Native Image metadata (reflect, proxy, jni, resource, serialization)
 └── kotlin/com/cherba29/boveda/
-    ├── Main.kt                             # Clikt CLI commands (BovedaCommand, ScanCommand, DbCommand, PrintDuplicatesCommand)
+    ├── Main.kt                                      # Entry point & backward-compatible typealiases
+    ├── cmds/
+    │   ├── Boveda.kt                                # Root Clikt command (boveda)
+    │   ├── Common.kt                                # Shared DB/snapshot resolution helpers
+    │   ├── Scan.kt                                  # 'scan' subcommand
+    │   ├── Db.kt                                    # 'db' subcommand
+    │   └── db/
+    │       ├── File.kt                              # 'db file' subcommand group
+    │       ├── Folder.kt                            # 'db folder' subcommand group
+    │       ├── Snapshots.kt                         # 'db snapshots' subcommand group
+    │       ├── file/
+    │       │   ├── PrintDuplicates.kt               # 'db file print-duplicates' subcommand
+    │       │   ├── Delete.kt                        # 'db file delete' subcommand
+    │       │   └── InteractiveDuplicateSelector.kt  # Interactive terminal multi-select duplicate deleter
+    │       ├── folder/
+    │       │   └── PrintDuplicates.kt               # 'db folder print-duplicates' subcommand
+    │       └── snapshots/
+    │           ├── List.kt                          # 'db snapshots list' subcommand
+    │           └── Delete.kt                        # 'db snapshots delete' subcommand
     ├── cache/
-    │   └── DeduplicationCache.kt           # In-memory deduplication cache & hit/miss metrics
+    │   └── DeduplicationCache.kt                    # Bounded Guava LRU deduplication cache & hit/miss metrics
     ├── hash/
-    │   └── FileHasher.kt                   # Streamed cryptographic hashing (FileHasher, MessageDigestFileHasher)
+    │   └── FileHasher.kt                            # Streaming file hashing with reusable 128 KB ThreadLocal buffers
     ├── logging/
-    │   └── LoggingConfig.kt                # Logback runtime level configuration
+    │   └── LoggingConfig.kt                         # Logback runtime level configuration
     ├── scanner/
-    │   ├── DiscoveredFile.kt               # Intermediate discovered file metadata
-    │   ├── ScannedFile.kt                  # File metadata DTO (path, size, hash, lastModified)
-    │   ├── DirectoryScanner.kt             # Scanner interface & FileTreeDirectoryScanner
-    │   ├── ParallelDirectoryScanner.kt     # Multi-threaded producer-consumer scanner
-    │   └── WorkStealingDirectoryScanner.kt # Work-stealing ForkJoinPool scanner
+    │   ├── DirectoryMetadata.kt                     # Sequential & work-stealing pre-scan metadata estimators
+    │   ├── DiscoveredFile.kt                        # Intermediate discovered file metadata
+    │   ├── ScannedFile.kt                           # File metadata DTO (path, size, hash, lastModified)
+    │   ├── DirectoryScanner.kt                      # Scanner interface & FileTreeDirectoryScanner
+    │   ├── ParallelDirectoryScanner.kt              # Multi-threaded producer-consumer scanner
+    │   └── WorkStealingDirectoryScanner.kt          # Bounded work-stealing ForkJoinPool scanner
     ├── progress/
-    │   └── ScanProgressIndicator.kt        # Mordant progress indicator & ingestion speed metrics
+    │   ├── EstimatingProgressIndicator.kt           # Mordant spinner for pre-scan metadata estimation
+    │   └── ScanProgressIndicator.kt                 # Throttled Mordant progress bar & ingestion speed metrics
     ├── model/
-    │   ├── FileRecords.kt                  # Database query DTOs (FileRecord, FileRecordWithDuplicateRank)
-    │   └── DuplicateStatistics.kt          # Duplicate statistics, percentile deciles, and formatters
+    │   ├── FileRecords.kt                           # Database query DTOs (FileRecord, FileRecordWithDuplicateRank, SnapshotSummary, FileDeletionResult)
+    │   ├── DuplicateStatistics.kt                   # File duplicate statistics, percentile deciles, and formatters
+    │   └── FolderDuplicateStatistics.kt             # Folder-pair duplicate statistics DTOs
     ├── db/
-    │   ├── Tables.kt                       # Exposed table definitions (RepoSnapshots, RepoFiles, RepoFileInstances)
-    │   ├── Entities.kt                     # Exposed DAO entities (RepoSnapshot, RepoFile, RepoFileInstance)
-    │   └── DatabaseFactory.kt              # H2 connection helpers & schema initializers
+    │   ├── Tables.kt                                # Exposed table definitions (RepoSnapshots, RepoFolders, RepoFiles, RepoFileInstances)
+    │   ├── Entities.kt                              # Exposed DAO entities (RepoSnapshot, RepoFolder, RepoFile, RepoFileInstance)
+    │   └── DatabaseFactory.kt                       # H2 connection helpers (with bounded CACHE_SIZE) & schema initializers
     └── service/
-        └── BovedaService.kt                # Coordination service for scanning, persistence, and queries
+        └── BovedaService.kt                         # Coordination service for scanning, persistence, deletion, and analytical queries
 ```
 
 ---

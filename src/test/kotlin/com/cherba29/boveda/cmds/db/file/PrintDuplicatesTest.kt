@@ -1,8 +1,9 @@
-package com.cherba29.boveda.cmds.db
+package com.cherba29.boveda.cmds.db.file
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.cmds.DbCommand
 import com.cherba29.boveda.cmds.ScanCommand
+import com.cherba29.boveda.cmds.db.FileCommand
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.logging.LoggingConfig
 import com.github.ajalt.clikt.testing.test
@@ -24,7 +25,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates help displays usage, parameters, and options`() {
+  fun `file print-duplicates help displays usage, parameters, and options`() {
     val command = PrintDuplicatesCommand()
     val result = command.test("--help")
 
@@ -35,10 +36,16 @@ class PrintDuplicatesTest {
     assertTrue(result.output.contains("--snapshot"))
     assertTrue(result.output.contains("--verbose"))
     assertTrue(result.output.contains("--log-level"))
+
+    val fileCmd = FileCommand()
+    val fileHelp = fileCmd.test("--help")
+    assertEquals(0, fileHelp.statusCode)
+    assertTrue(fileHelp.output.contains("print-duplicates"))
+    assertTrue(fileHelp.output.contains("delete"))
   }
 
   @Test
-  fun `print-duplicates with verbose flag outputs duplicate files and duplication summary statistics`() {
+  fun `file print-duplicates with verbose flag outputs duplicate files and duplication summary statistics`() {
     val tempDir = Files.createTempDirectory("print-dups-test-dir")
     val dbDir = Files.createTempDirectory("print-dups-test-db")
     try {
@@ -74,7 +81,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates without verbose flag only outputs summary and top 10 without individual entries`() {
+  fun `file print-duplicates without verbose flag only outputs summary and top 10 without individual entries`() {
     val tempDir = Files.createTempDirectory("print-dups-noverbose-dir")
     val dbDir = Files.createTempDirectory("print-dups-noverbose-db")
     try {
@@ -108,7 +115,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates reports no duplicates when all files are unique`() {
+  fun `file print-duplicates reports no duplicates when all files are unique`() {
     val tempDir = Files.createTempDirectory("print-no-dups-dir")
     val dbDir = Files.createTempDirectory("print-no-dups-db")
     try {
@@ -130,7 +137,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates resolves database path when invoked under DbCommand`() {
+  fun `file print-duplicates resolves database path and snapshot when invoked under DbCommand and FileCommand`() {
     val tempDir = Files.createTempDirectory("print-dups-parent-dir")
     val dbDir = Files.createTempDirectory("print-dups-parent-db")
     try {
@@ -141,10 +148,15 @@ class PrintDuplicatesTest {
       assertEquals(0, scanCmd.test(listOf(tempDir.toString(), dbFile.toString())).statusCode)
 
       val dbCmd = DbCommand()
-      val result = dbCmd.test(listOf(dbFile.toString(), "print-duplicates", "--verbose"))
+      val result1 = dbCmd.test(listOf(dbFile.toString(), "file", "print-duplicates", "--verbose"))
+      assertEquals(0, result1.statusCode)
+      assertTrue(result1.output.contains("### ==== Duplicate Files in DB ==== ###"))
 
-      assertEquals(0, result.statusCode)
-      assertTrue(result.output.contains("### ==== Duplicate Files in DB ==== ###"))
+      val result2 = dbCmd.test(
+        listOf("file", "--snapshot", "1", dbFile.toString(), "print-duplicates", "--verbose")
+      )
+      assertEquals(0, result2.statusCode)
+      assertTrue(result2.output.contains("### ==== Duplicate Files in DB ==== ###"))
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()
@@ -152,7 +164,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates reports when no snapshots found in database`() {
+  fun `file print-duplicates reports when no snapshots found in database`() {
     val tempDir = Files.createTempDirectory("print-dups-empty-db")
     try {
       val emptyDb = tempDir.resolve("empty_db")
@@ -170,7 +182,7 @@ class PrintDuplicatesTest {
   }
 
   @Test
-  fun `print-duplicates fails when database file does not exist`() {
+  fun `file print-duplicates fails when database file does not exist`() {
     val printDupCmd = PrintDuplicatesCommand()
     val result = printDupCmd.test(listOf("/path/to/definitely/nonexistent.db"))
 

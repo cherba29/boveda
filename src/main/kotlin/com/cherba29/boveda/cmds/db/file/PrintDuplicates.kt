@@ -1,9 +1,10 @@
-package com.cherba29.boveda.cmds.db
+package com.cherba29.boveda.cmds.db.file
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.cmds.connectDatabase
 import com.cherba29.boveda.cmds.resolveDatabasePath
 import com.cherba29.boveda.cmds.resolveSnapshot
+import com.cherba29.boveda.cmds.resolveSnapshotId
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
@@ -20,7 +21,8 @@ import kotlin.time.Duration.Companion.nanoseconds
 import org.jetbrains.exposed.v1.jdbc.Database
 
 /**
- * Clikt subcommand for querying the database for the latest snapshot and printing duplicate files and statistics.
+ * Clikt subcommand for querying the database for the latest snapshot and printing duplicate files
+ * and statistics.
  */
 class PrintDuplicatesCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null
@@ -76,7 +78,8 @@ class PrintDuplicatesCommand(
     val repoDb = connectDatabase(resolvedDbPath, serviceFactory)
 
     val service = serviceFactory?.invoke(repoDb) ?: BovedaService(database = repoDb)
-    val snapshot = resolveSnapshot(service, snapshotIdOption)
+    val effectiveSnapshotId = resolveSnapshotId(currentContext, snapshotIdOption)
+    val snapshot = resolveSnapshot(service, effectiveSnapshotId)
     if (snapshot == null) {
       echo("No snapshots found in database.")
       return
@@ -104,3 +107,8 @@ class PrintDuplicatesCommand(
     service.printDuplicateStatistics(stats) { echo(it) }
   }
 }
+
+/**
+ * Backward-compatible typealias for [PrintDuplicatesCommand].
+ */
+typealias FilePrintDuplicatesCommand = PrintDuplicatesCommand
