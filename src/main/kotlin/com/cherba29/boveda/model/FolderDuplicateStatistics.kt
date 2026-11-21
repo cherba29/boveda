@@ -49,3 +49,48 @@ data class FolderDuplicatePair(
   val duplicateStoragePercentage: Double,
   val topDuplicateFiles: List<DuplicateFileEntry>
 )
+
+/**
+ * Represents a group of 100% matching folders sharing the exact same set of files.
+ *
+ * @property signature Deterministic fingerprint of the exact multiset of files in each folder.
+ * @property fileCount Number of files in each folder.
+ * @property folderBytes Total storage size in bytes of a single folder copy.
+ * @property paths Normalized folder paths of all 100% matching folders in this group.
+ * @property sampleFiles Up to 5 largest sample files `(fileName, sizeBytes)` for display context.
+ */
+data class DuplicateFolderGroup(
+  val signature: String,
+  val fileCount: Int,
+  val folderBytes: Long,
+  val paths: List<String>,
+  val sampleFiles: List<Pair<String, Long>> = emptyList()
+) {
+  /** Number of identical folder copies in this group. */
+  val copyCount: Int get() = paths.size
+
+  /** Total storage wasted by redundant folder copies (excluding 1 original copy). */
+  val wastedBytes: Long get() = (copyCount - 1L).coerceAtLeast(0L) * folderBytes
+
+  /** Total storage consumed by all folder copies combined. */
+  val totalDuplicateBytes: Long get() = copyCount.toLong() * folderBytes
+}
+
+/**
+ * Result model representing the deletion outcome of a folder from disk and database.
+ *
+ * @property path The normalized folder path.
+ * @property filesDeletedFromDisk Number of files inside this folder deleted from the filesystem.
+ * @property filesDeletedFromDb Number of file instances deleted from the database.
+ * @property folderDeletedFromDisk Whether the directory itself was removed from the filesystem.
+ * @property deletedFromDb Whether the folder record was deleted from the database.
+ * @property hasMatchingDuplicate Whether a 100% matching duplicate folder existed prior to deletion.
+ */
+data class FolderDeletionResult(
+  val path: String,
+  val filesDeletedFromDisk: Int,
+  val filesDeletedFromDb: Int,
+  val folderDeletedFromDisk: Boolean,
+  val deletedFromDb: Boolean,
+  val hasMatchingDuplicate: Boolean
+)

@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds
 
 import ch.qos.logback.classic.Level
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.DuplicateFolderGroup
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.progress.EstimatingProgressIndicator
 import com.cherba29.boveda.progress.ScanProgressIndicator
@@ -32,7 +33,8 @@ class BovedaCommand(
     (
       Terminal
     ) -> EstimatingProgressIndicator
-  )? = null
+  )? = null,
+  private val folderSelector: ((DuplicateFolderGroup) -> List<String>?)? = null
 ) : CliktCommand(
   name = "boveda"
 ) {
@@ -61,7 +63,7 @@ class BovedaCommand(
         progressIndicatorFactory = progressIndicatorFactory,
         estimatingProgressIndicatorFactory = estimatingProgressIndicatorFactory
       ),
-      DbCommand(serviceFactory, selector)
+      DbCommand(serviceFactory, selector, folderSelector)
     )
   }
 

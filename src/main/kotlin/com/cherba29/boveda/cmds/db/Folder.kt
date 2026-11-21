@@ -1,8 +1,10 @@
 package com.cherba29.boveda.cmds.db
 
 import ch.qos.logback.classic.Level
+import com.cherba29.boveda.cmds.db.folder.DeleteCommand
 import com.cherba29.boveda.cmds.db.folder.PrintDuplicatesCommand
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.DuplicateFolderGroup
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -17,14 +19,16 @@ import java.nio.file.Path
 import org.jetbrains.exposed.v1.jdbc.Database
 
 /**
- * Clikt subcommand for managing and analyzing folders in the database.
+ * Clikt subcommand for managing and analyzing folders in the database (print-duplicates, delete).
  */
 class FolderCommand(
-  private val serviceFactory: ((Database) -> BovedaService)? = null
+  private val serviceFactory: ((Database) -> BovedaService)? = null,
+  private val folderSelector: ((DuplicateFolderGroup) -> List<String>?)? = null
 ) : CliktCommand(
   name = "folder"
 ) {
-  override fun help(context: Context): String = "Manage and analyze folders in the database."
+  override fun help(context: Context): String =
+    "Manage and analyze folders in the database (print-duplicates, delete)."
 
   val dbPath: Path? by argument(
     name = "DATABASE",
@@ -60,7 +64,8 @@ class FolderCommand(
 
   init {
     subcommands(
-      PrintDuplicatesCommand(serviceFactory)
+      PrintDuplicatesCommand(serviceFactory),
+      DeleteCommand(serviceFactory, folderSelector)
     )
   }
 

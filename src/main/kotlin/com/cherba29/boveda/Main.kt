@@ -51,7 +51,10 @@ typealias DeleteCommand = com.cherba29.boveda.cmds.db.snapshots.DeleteCommand
 typealias DeleteSnapshotCommand = com.cherba29.boveda.cmds.db.snapshots.DeleteSnapshotCommand
 typealias FolderCommand = com.cherba29.boveda.cmds.db.FolderCommand
 typealias FolderPrintDuplicatesCommand = com.cherba29.boveda.cmds.db.folder.PrintDuplicatesCommand
+typealias FolderDeleteCommand = com.cherba29.boveda.cmds.db.folder.DeleteCommand
 typealias FolderDuplicatePair = com.cherba29.boveda.model.FolderDuplicatePair
+typealias DuplicateFolderGroup = com.cherba29.boveda.model.DuplicateFolderGroup
+typealias FolderDeletionResult = com.cherba29.boveda.model.FolderDeletionResult
 typealias DuplicateFileEntry = com.cherba29.boveda.model.DuplicateFileEntry
 
 /**

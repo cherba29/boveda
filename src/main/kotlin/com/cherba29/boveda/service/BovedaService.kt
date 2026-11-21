@@ -12,11 +12,13 @@ import com.cherba29.boveda.db.RepoFolders
 import com.cherba29.boveda.db.RepoSnapshot
 import com.cherba29.boveda.db.RepoSnapshots
 import com.cherba29.boveda.model.DuplicateFileEntry
+import com.cherba29.boveda.model.DuplicateFolderGroup
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.model.DuplicateStatistics
 import com.cherba29.boveda.model.FileDeletionResult
 import com.cherba29.boveda.model.FileRecord
 import com.cherba29.boveda.model.FileRecordWithDuplicateRank
+import com.cherba29.boveda.model.FolderDeletionResult
 import com.cherba29.boveda.model.FolderDuplicatePair
 import com.cherba29.boveda.model.PercentileBucket
 import com.cherba29.boveda.model.SnapshotSummary
@@ -1835,6 +1837,369 @@ class BovedaService(
     out(line)
     out("")
   }
+
+  private fun hasChildFolders(conn: Connection, snapshotId: Int, folderPath: String): Boolean {
+    val prefix = if (folderPath == "/") "/" else "$folderPath/"
+    val sql = """
+      SELECT 1
+      FROM folders
+      WHERE snapshot_id = ?
+        AND "path" <> ?
+        AND LEFT("path", ?) = ?
+      LIMIT 1
+    """.trimIndent()
+    return conn.prepareStatement(sql).use { stmt ->
+      stmt.setInt(1, snapshotId)
+      stmt.setString(2, folderPath)
+      stmt.setInt(3, prefix.length)
+      stmt.setString(4, prefix)
+      stmt.executeQuery().use { rs -> rs.next() }
+    }
+  }
+
+  private fun computeFolderContentSignature(fileIds: List<Int>): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    val buf = java.nio.ByteBuffer.allocate(Int.SIZE_BYTES)
+    buf.putInt(fileIds.size)
+    digest.update(buf.array())
+    for (id in fileIds) {
+      buf.clear()
+      buf.putInt(id)
+      digest.update(buf.array())
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+  }
+
+  /**
+   * Finds a [RepoFolder] matching [path] within [snapshotId].
+   * Handles absolute, relative, raw, or snapshot root-relative path matching.
+   */
+  fun findFolder(snapshotId: Int, path: Path): RepoFolder? = transaction(database) {
+    val absPathStr = path.toAbsolutePath().normalize().invariantSeparatorsPathString
+    val relPathStr = path.normalize().invariantSeparatorsPathString
+    val rawPathStr = path.invariantSeparatorsPathString
+
+    var folder = RepoFolder.find {
+      (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq absPathStr)
+    }.firstOrNull()
+
+    if (folder == null) {
+      folder = RepoFolder.find {
+        (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq relPathStr)
+      }.firstOrNull()
+    }
+
+    if (folder == null) {
+      folder = RepoFolder.find {
+        (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq rawPathStr)
+      }.firstOrNull()
+    }
+
+    if (folder == null) {
+      val snapshot = RepoSnapshot.findById(snapshotId)
+      if (snapshot != null) {
+        val rootResolved = Path.of(snapshot.rootPath).resolve(path)
+          .normalize().invariantSeparatorsPathString
+        folder = RepoFolder.find {
+          (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq rootResolved)
+        }.firstOrNull()
+      }
+    }
+
+    folder
+  }
+
+  /**
+   * Retrieves all groups of 100% matching folders in [snapshotId] that contain the exact same
+   * multiset of files (and have no child subfolders in the snapshot).
+   */
+  fun getIdenticalFolderGroups(snapshotId: Int): List<DuplicateFolderGroup> =
+    transaction(database) {
+      val conn = TransactionManager.current().connection.connection as Connection
+
+      data class CandidateFolder(
+        val folderId: Int,
+        val path: String,
+        val fileCount: Int,
+        val totalBytes: Long
+      )
+
+      val candidateSql = """
+        SELECT folder_id, folder_path, inst_count, total_bytes
+        FROM (
+          SELECT
+            fs.folder_id,
+            fs.folder_path,
+            fs.inst_count,
+            fs.total_bytes,
+            COUNT(*) OVER (PARTITION BY fs.inst_count, fs.total_bytes) AS bucket_size
+          FROM (
+            SELECT
+              fi.folder_id,
+              f."path" AS folder_path,
+              COUNT(*) AS inst_count,
+              COALESCE(SUM(fl."size"), 0) AS total_bytes
+            FROM file_instances fi
+            JOIN files fl ON fi.file_id = fl.id
+            JOIN folders f ON fi.folder_id = f.id
+            WHERE fi.snapshot_id = ?
+            GROUP BY fi.folder_id, f."path"
+            HAVING COUNT(*) > 0
+          ) fs
+        ) ranked
+        WHERE bucket_size > 1
+        ORDER BY total_bytes DESC, inst_count DESC, folder_path ASC
+      """.trimIndent()
+
+      val candidates = mutableListOf<CandidateFolder>()
+      conn.prepareStatement(candidateSql).use { stmt ->
+        stmt.setInt(1, snapshotId)
+        stmt.executeQuery().use { rs ->
+          while (rs.next()) {
+            candidates.add(
+              CandidateFolder(
+                folderId = rs.getInt("folder_id"),
+                path = rs.getString("folder_path"),
+                fileCount = rs.getInt("inst_count"),
+                totalBytes = rs.getLong("total_bytes")
+              )
+            )
+          }
+        }
+      }
+
+      if (candidates.isEmpty()) return@transaction emptyList()
+
+      val groups = mutableListOf<DuplicateFolderGroup>()
+      val byBucket = candidates.groupBy { Pair(it.fileCount, it.totalBytes) }
+
+      for ((bucketKey, bucketFolders) in byBucket) {
+        val leafFolders = bucketFolders.filter { !hasChildFolders(conn, snapshotId, it.path) }
+        if (leafFolders.size < 2) continue
+
+        val fileIdsByFolder = HashMap<Int, MutableList<Int>>(leafFolders.size)
+        for (chunk in leafFolders.chunked(500)) {
+          val placeholders = chunk.joinToString(",") { "?" }
+          val filesSql = """
+            SELECT folder_id, file_id
+            FROM file_instances
+            WHERE snapshot_id = ?
+              AND folder_id IN ($placeholders)
+            ORDER BY folder_id, file_id
+          """.trimIndent()
+          conn.prepareStatement(filesSql).use { stmt ->
+            stmt.setInt(1, snapshotId)
+            chunk.forEachIndexed { idx, folder -> stmt.setInt(idx + 2, folder.folderId) }
+            stmt.executeQuery().use { rs ->
+              while (rs.next()) {
+                val fId = rs.getInt("folder_id")
+                val fileId = rs.getInt("file_id")
+                fileIdsByFolder.getOrPut(fId) { mutableListOf() }.add(fileId)
+              }
+            }
+          }
+        }
+
+        val bySignature = linkedMapOf<String, MutableList<CandidateFolder>>()
+        for (folder in leafFolders) {
+          val fileIds = fileIdsByFolder[folder.folderId] ?: continue
+          if (fileIds.size != bucketKey.first) continue
+          val signature = computeFolderContentSignature(fileIds)
+          bySignature.getOrPut(signature) { mutableListOf() }.add(folder)
+        }
+
+        for ((signature, matchingFolders) in bySignature) {
+          if (matchingFolders.size >= 2) {
+            groups.add(
+              DuplicateFolderGroup(
+                signature = signature,
+                fileCount = bucketKey.first,
+                folderBytes = bucketKey.second,
+                paths = matchingFolders.map { it.path }.sorted()
+              )
+            )
+          }
+        }
+      }
+
+      groups.sortedWith(
+        compareByDescending<DuplicateFolderGroup> { it.wastedBytes }
+          .thenByDescending { it.totalDuplicateBytes }
+          .thenByDescending { it.folderBytes }
+          .thenByDescending { it.fileCount }
+          .thenBy { it.paths.first() }
+      )
+    }
+
+  /**
+   * Finds the 100% matching duplicate folder group in [snapshotId] where most storage is wasted,
+   * excluding any groups whose signature is in [excludedSignatures].
+   */
+  fun findLargestIdenticalFolderGroup(
+    snapshotId: Int,
+    excludedSignatures: Set<String> = emptySet()
+  ): DuplicateFolderGroup? = transaction(database) {
+    val candidate = getIdenticalFolderGroups(snapshotId)
+      .firstOrNull { it.signature !in excludedSignatures }
+      ?: return@transaction null
+
+    val sampleFolderPath = candidate.paths.first()
+    val folderEntity = RepoFolder.find {
+      (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq sampleFolderPath)
+    }.firstOrNull()
+
+    val sampleFiles = if (folderEntity != null) {
+      val conn = TransactionManager.current().connection.connection as Connection
+      val sampleSql = """
+        SELECT fi."path" AS file_path, fl."size" AS sz
+        FROM file_instances fi
+        JOIN files fl ON fi.file_id = fl.id
+        WHERE fi.snapshot_id = ?
+          AND fi.folder_id = ?
+        ORDER BY fl."size" DESC, fi."path" ASC
+        LIMIT 5
+      """.trimIndent()
+      val samples = mutableListOf<Pair<String, Long>>()
+      conn.prepareStatement(sampleSql).use { stmt ->
+        stmt.setInt(1, snapshotId)
+        stmt.setInt(2, folderEntity.id.value)
+        stmt.executeQuery().use { rs ->
+          while (rs.next()) {
+            val filePath = rs.getString("file_path")
+            val name = Path.of(filePath).fileName?.toString() ?: filePath
+            samples.add(name to rs.getLong("sz"))
+          }
+        }
+      }
+      samples
+    } else {
+      emptyList()
+    }
+
+    candidate.copy(sampleFiles = sampleFiles)
+  }
+
+  private fun deleteFolderInternal(
+    snapshotId: Int,
+    folder: RepoFolder,
+    hasMatchingDuplicate: Boolean,
+    fallbackDiskPath: Path? = null
+  ): FolderDeletionResult {
+    val folderPathStr = folder.path
+    val folderId = folder.id
+
+    val instances = RepoFileInstances.select(RepoFileInstances.file, RepoFileInstances.path)
+      .where {
+        (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.folder eq folderId)
+      }
+      .map { it[RepoFileInstances.file] to it[RepoFileInstances.path] }
+
+    val fileIdsToCheck = mutableSetOf<EntityID<Int>>()
+    var filesDeletedFromDisk = 0
+    for ((fileId, pathStr) in instances) {
+      fileIdsToCheck.add(fileId)
+      val deleted = try {
+        Files.deleteIfExists(Path.of(pathStr))
+      } catch (_: Exception) {
+        false
+      }
+      if (deleted) filesDeletedFromDisk++
+    }
+
+    val filesDeletedFromDb = RepoFileInstances.deleteWhere {
+      (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.folder eq folderId)
+    }
+
+    RepoFolders.deleteWhere { RepoFolders.id eq folderId }
+    folderCache.invalidate(Pair(snapshotId, folderPathStr))
+
+    for (fileId in fileIdsToCheck) {
+      val remaining = RepoFileInstances.select(RepoFileInstances.id)
+        .where { RepoFileInstances.file eq fileId }
+        .count()
+      if (remaining == 0L) {
+        RepoFiles.deleteWhere { RepoFiles.id eq fileId }
+      }
+    }
+
+    val dirPath = Path.of(folderPathStr)
+    val actualDirPath = if (Files.exists(dirPath)) dirPath else (fallbackDiskPath ?: dirPath)
+    val folderDeletedFromDisk = try {
+      Files.deleteIfExists(actualDirPath)
+    } catch (_: Exception) {
+      false
+    }
+
+    return FolderDeletionResult(
+      path = folderPathStr,
+      filesDeletedFromDisk = filesDeletedFromDisk,
+      filesDeletedFromDb = filesDeletedFromDb,
+      folderDeletedFromDisk = folderDeletedFromDisk,
+      deletedFromDb = true,
+      hasMatchingDuplicate = hasMatchingDuplicate
+    )
+  }
+
+  /**
+   * Removes a folder and its recorded files from disk and database within [snapshotId].
+   * Fails if the folder does not have a 100% matching duplicate folder unless [force] is true.
+   */
+  fun deleteFolder(snapshotId: Int, path: Path, force: Boolean = false): FolderDeletionResult =
+    transaction(database) {
+      val folder = findFolder(snapshotId, path)
+        ?: throw IllegalArgumentException("Folder not found in database: $path")
+
+      val identicalGroups = getIdenticalFolderGroups(snapshotId)
+      val hasMatchingDuplicate = identicalGroups.any { folder.path in it.paths }
+
+      if (!hasMatchingDuplicate && !force) {
+        throw IllegalStateException(
+          "Folder does not have a 100% matching duplicate folder: $path. " +
+            "Use --force to delete anyway."
+        )
+      }
+
+      deleteFolderInternal(
+        snapshotId = snapshotId,
+        folder = folder,
+        hasMatchingDuplicate = hasMatchingDuplicate,
+        fallbackDiskPath = path
+      )
+    }
+
+  /**
+   * Deletes multiple duplicate folders by normalized path from disk and database in [snapshotId].
+   */
+  fun deleteDuplicateFolders(snapshotId: Int, paths: List<String>): List<FolderDeletionResult> =
+    transaction(database) {
+      paths.map { pathStr ->
+        val folder = RepoFolder.find {
+          (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq pathStr)
+        }.firstOrNull()
+
+        if (folder != null) {
+          deleteFolderInternal(
+            snapshotId = snapshotId,
+            folder = folder,
+            hasMatchingDuplicate = true
+          )
+        } else {
+          val deletedFromDisk = try {
+            Files.deleteIfExists(Path.of(pathStr))
+          } catch (_: Exception) {
+            false
+          }
+          FolderDeletionResult(
+            path = pathStr,
+            filesDeletedFromDisk = 0,
+            filesDeletedFromDb = 0,
+            folderDeletedFromDisk = deletedFromDisk,
+            deletedFromDb = false,
+            hasMatchingDuplicate = true
+          )
+        }
+      }
+    }
 }
 
 /**

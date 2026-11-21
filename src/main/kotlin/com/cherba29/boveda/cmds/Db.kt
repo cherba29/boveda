@@ -5,6 +5,7 @@ import com.cherba29.boveda.cmds.db.FileCommand
 import com.cherba29.boveda.cmds.db.FolderCommand
 import com.cherba29.boveda.cmds.db.SnapshotsCommand
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.DuplicateFolderGroup
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
@@ -24,7 +25,8 @@ import org.jetbrains.exposed.v1.jdbc.Database
  */
 class DbCommand(
   private val serviceFactory: ((Database) -> BovedaService)? = null,
-  private val selector: ((DuplicateGroup) -> List<String>?)? = null
+  private val selector: ((DuplicateGroup) -> List<String>?)? = null,
+  private val folderSelector: ((DuplicateFolderGroup) -> List<String>?)? = null
 ) : CliktCommand(
   name = "db"
 ) {
@@ -68,7 +70,7 @@ class DbCommand(
     subcommands(
       SnapshotsCommand(serviceFactory),
       FileCommand(serviceFactory, selector),
-      FolderCommand(serviceFactory)
+      FolderCommand(serviceFactory, folderSelector)
     )
   }
 

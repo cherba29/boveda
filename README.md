@@ -6,7 +6,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 
 ## Features
 
-- **Decoupled CLI Commands (`scan` and `db`)**: Clean separation between directory scanning / database population (`scan`) and offline analytical database querying and cleanup (`db`, `db file print-duplicates`, `db file delete`, `db folder print-duplicates`, `db snapshots list`, `db snapshots delete`).
+- **Decoupled CLI Commands (`scan` and `db`)**: Clean separation between directory scanning / database population (`scan`) and offline analytical database querying and cleanup (`db`, `db file print-duplicates`, `db file delete`, `db folder print-duplicates`, `db folder delete`, `db snapshots list`, `db snapshots delete`).
 - **Resume Incomplete Scans (`scan --continue <snapshot_id>`)**: If a scan is interrupted or terminated midway, resume where it left off using the snapshot ID. The root directory is retrieved directly from the snapshot, and files already processed with matching path, name, timestamp, and size are skipped without recomputing hashes.
 - **Work-Stealing Parallel Directory Scanner**: Concurrently explores directory branches across a strictly bounded `ForkJoinPool`, dynamically balancing subdirectory traversal and file hashing tasks via thread-local deques to maximize throughput on NVMe SSDs and multi-core CPUs without thread storms.
 - **Multi-Threaded Producer-Consumer Pipeline**: Optional producer-consumer strategy (`--scanner parallel`) decoupling directory walking (Stage 1), parallel hashing across a fixed worker pool (Stage 2), and database persistence (Stage 3) via bounded queues.
@@ -15,7 +15,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **High-Throughput Batch Ingestion**: Buffers scanned files into configurable batch sizes (default `1000` files/transaction) and issues optimized SQL `batchInsert` operations.
 - **File-Level Duplication Statistics (`db file print-duplicates`)**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) and outputs a statistical report including total files/storage scanned, wasted duplicate storage, top 10 duplicate groups ordered by combined duplicate space, and a Mordant-rendered 10% percentile deciles table.
 - **Folder-Level Duplicate Analysis (`db folder print-duplicates`)**: Identifies top folder pairs sharing duplicate files, showing shared vs. differing file counts, duplicated storage percentages, and the largest duplicated files in each pair.
-- **Safe & Interactive Duplicate Deletion (`db file delete`)**: Delete a specific duplicate file from disk and database (refusing to delete unique files unless `--force` is passed) or launch an interactive terminal selector to reclaim space starting from the largest duplicate groups.
+- **Safe & Interactive Duplicate Deletion (`db file delete`, `db folder delete`)**: Delete specific duplicate files or 100% matching duplicate folders from disk and database (refusing to delete non-duplicated entries unless `--force` is passed) or launch interactive terminal selectors to reclaim space starting from the largest duplicate groups.
 - **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status, or delete snapshots with automatic cascade cleanup of orphaned records.
 - **Pre-Scan Estimation & Live Mordant Progress Bar**: Displays an animated estimation spinner before scanning (skippable via `--no-estimate`) and, during `--quiet` scans, a throttled Mordant progress bar showing percentage, ETA, processed file counts, and live ingestion speeds (files/s and MB/s).
 - **Rich CLI with Clikt & GraalVM Native Image Ready**: Structured subcommand CLI with path validation, runtime log-level control, and GraalVM Native Image metadata for compiling a standalone native binary.
@@ -246,7 +246,37 @@ Arguments:
   <database>  Path to persistent H2 database file.
 ```
 
-### 6. `db snapshots list` Subcommand
+### 6. `db folder delete` Subcommand
+
+Deletes 100% matching duplicate folders (folders containing the exact same identical files with no extra files or subfolders) from disk and the database snapshot, automatically cleaning up orphaned CAS records:
+
+- **Single-Folder Mode**: If a folder path is specified, deletes its recorded files and removes the folder from disk (if empty) and database, only if a 100% matching duplicate folder exists (or if `--force` is specified).
+- **Interactive Mode**: If no folder path is specified, finds the largest 100% matching duplicate folder group and provides an interactive terminal multi-select prompt (<kbd>↑</kbd>/<kbd>↓</kbd> navigate, <kbd>Space</kbd>/<kbd>x</kbd> toggle, <kbd>a</kbd> toggle all, <kbd>s</kbd> skip, <kbd>Enter</kbd> delete selected, <kbd>Esc</kbd> quit), looping through all 100% matching groups.
+
+```text
+Usage: boveda db folder delete [<options>] [<folder>] [<database>]
+# or: boveda db [<database>] folder delete [<folder>] [<options>]
+
+  Delete 100% matching duplicate folders from the filesystem and database.
+
+Options:
+  -f, --folder=<path>   Path to folder to delete.
+  -d, --db=<path>       Path to persistent H2 database file.
+  --force               Force deletion of folder even if it does not have a
+                        100% matching duplicate.
+  -s, --snapshot=<int>  Optional snapshot ID to query. Defaults to the latest
+                        snapshot.
+  -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
+                        Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
+  -h, --help            Show this message and exit
+
+Arguments:
+  <folder>    Path to folder to delete (optional; if omitted, starts
+              interactive duplicate deletion).
+  <database>  Path to persistent H2 database file.
+```
+
+### 7. `db snapshots list` Subcommand
 
 Lists all recorded snapshots in the database in a formatted table showing snapshot ID, root path, file count, total storage size, and completion status:
 
@@ -266,7 +296,7 @@ Arguments:
   <database>  Path to persistent H2 database file.
 ```
 
-### 7. `db snapshots delete` Subcommand
+### 8. `db snapshots delete` Subcommand
 
 Deletes a snapshot by its ID from the database, cascading to remove its folders, file instances, and any orphaned content records no longer referenced by other snapshots:
 
@@ -615,7 +645,9 @@ src/main/
     │       │   ├── Delete.kt                        # 'db file delete' subcommand
     │       │   └── InteractiveDuplicateSelector.kt  # Interactive terminal multi-select duplicate deleter
     │       ├── folder/
-    │       │   └── PrintDuplicates.kt               # 'db folder print-duplicates' subcommand
+    │       │   ├── PrintDuplicates.kt               # 'db folder print-duplicates' subcommand
+    │       │   ├── Delete.kt                        # 'db folder delete' subcommand
+    │       │   └── InteractiveDuplicateFolderSelector.kt # Interactive 100% matching duplicate folder selector
     │       └── snapshots/
     │           ├── List.kt                          # 'db snapshots list' subcommand
     │           └── Delete.kt                        # 'db snapshots delete' subcommand
