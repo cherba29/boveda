@@ -24,27 +24,37 @@ object DatabaseFactory {
   }
 
   /**
-   * Default H2 in-memory page cache limit in KB (16 MB target, capping H2's JVM heap footprint).
+   * Default H2 in-memory page cache limit in KB for queries (16 MB target).
    */
   const val DEFAULT_H2_CACHE_SIZE_KB = 16_384
 
   /**
+   * Default H2 in-memory page cache limit in KB during bulk scanning (64 MB target), keeping
+   * B-tree indexes hot in RAM longer on large directory trees.
+   */
+  const val DEFAULT_SCAN_H2_CACHE_SIZE_KB = 65_536
+
+  /**
    * Connects to a persistent file-based H2 database at [path] and initializes tables.
    *
-   * When [bulkInsert] is true (e.g. during `scan`), increases H2's `WRITE_DELAY` to 2000ms to
-   * amortize MVStore disk flushes and reduce antivirus rescan overhead on Windows; callers should
-   * invoke [shutdown] when finished to flush all pages cleanly.
+   * When [bulkInsert] is true (e.g. during `scan`), defaults to a 64 MB H2 page cache
+   * ([DEFAULT_SCAN_H2_CACHE_SIZE_KB]) and increases H2's `WRITE_DELAY` to 2000ms to amortize
+   * MVStore disk flushes and reduce antivirus rescan overhead on Windows; callers should invoke
+   * [shutdown] when finished to flush all pages cleanly.
    */
-  fun connectFile(
-    path: String,
-    cacheSizeKb: Int = DEFAULT_H2_CACHE_SIZE_KB,
-    bulkInsert: Boolean = false
-  ): Database {
-    require(cacheSizeKb >= 0) { "cacheSizeKb must be non-negative, but was $cacheSizeKb" }
+  fun connectFile(path: String, cacheSizeKb: Int? = null, bulkInsert: Boolean = false): Database {
+    val effectiveCacheSizeKb = cacheSizeKb ?: if (bulkInsert) {
+      DEFAULT_SCAN_H2_CACHE_SIZE_KB
+    } else {
+      DEFAULT_H2_CACHE_SIZE_KB
+    }
+    require(effectiveCacheSizeKb >= 0) {
+      "cacheSizeKb must be non-negative, but was $effectiveCacheSizeKb"
+    }
     val normalizedPath = if (path.endsWith(".mv.db")) path.removeSuffix(".mv.db") else path
     val writeDelaySuffix = if (bulkInsert) ";WRITE_DELAY=2000" else ""
     val database = Database.connect(
-      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1;CACHE_SIZE=$cacheSizeKb" +
+      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1;CACHE_SIZE=$effectiveCacheSizeKb" +
         writeDelaySuffix,
       driver = "org.h2.Driver"
     )

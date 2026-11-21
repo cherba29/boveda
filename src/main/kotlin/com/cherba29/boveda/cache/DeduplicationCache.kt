@@ -3,6 +3,7 @@ package com.cherba29.boveda.cache
 import com.cherba29.boveda.db.RepoFiles
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import org.jetbrains.exposed.v1.core.dao.id.EntityID
 import org.jetbrains.exposed.v1.jdbc.Database
@@ -79,6 +80,12 @@ interface DeduplicationCache {
   fun clear()
 
   /**
+   * Returns whether any entries have been evicted from this cache due to size limits.
+   * Conservative implementations should return `true`.
+   */
+  fun hasEvictions(): Boolean = true
+
+  /**
    * Returns a snapshot of current cache statistics.
    */
   fun getStatistics(): CacheStatistics
@@ -109,11 +116,17 @@ class InMemoryDeduplicationCache(
     require(maxSize >= 1L) { "maxSize must be at least 1, but was $maxSize" }
   }
 
+  private val evicted = AtomicBoolean(false)
   private val cache: Cache<FileContentKey, Int> = run {
     val maxCap = maxSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     CacheBuilder.newBuilder()
       .initialCapacity(initialCapacity.coerceAtMost(maxCap))
       .maximumSize(maxSize)
+      .removalListener<FileContentKey, Int> { notification ->
+        if (notification.wasEvicted()) {
+          evicted.set(true)
+        }
+      }
       .build()
   }
   private val hits = AtomicLong(0)
@@ -158,9 +171,12 @@ class InMemoryDeduplicationCache(
 
   override fun size(): Int = cache.size().toInt()
 
+  override fun hasEvictions(): Boolean = evicted.get()
+
   override fun clear() {
     cache.invalidateAll()
     cache.cleanUp()
+    evicted.set(false)
     hits.set(0)
     misses.set(0)
   }

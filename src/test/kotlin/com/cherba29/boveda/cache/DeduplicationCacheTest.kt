@@ -163,5 +163,18 @@ class DeduplicationCacheTest {
     val loaded = bounded.warmUp(db)
     assertEquals(4, loaded)
     assertEquals(4, bounded.size())
+
+    // Eviction flag tracks LRU evictions and resets on clear()
+    val evictCache = InMemoryDeduplicationCache(maxSize = 2)
+    assertFalse(evictCache.hasEvictions())
+    evictCache.put(1L, "h1", EntityID(1, RepoFiles))
+    evictCache.put(2L, "h2", EntityID(2, RepoFiles))
+    assertFalse(evictCache.hasEvictions())
+    for (i in 3..20) {
+      evictCache.put(i.toLong(), "h$i", EntityID(i, RepoFiles))
+    }
+    assertTrue(evictCache.hasEvictions())
+    evictCache.clear()
+    assertFalse(evictCache.hasEvictions())
   }
 }

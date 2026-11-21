@@ -139,6 +139,11 @@ class ScanCommand(
     help = "Skip the initial directory traversal that estimates total file count and size."
   ).flag(default = false)
 
+  val dbCacheMb: Int by option(
+    "--db-cache-mb",
+    help = "H2 in-memory page cache size in MB during scanning. Default is 64."
+  ).int().default(64)
+
   val logLevel: Level? by option(
     "-l",
     "--log-level",
@@ -185,8 +190,16 @@ class ScanCommand(
       directory to (dbPath ?: dbOption)
     }
 
+    if (dbCacheMb < 0) {
+      throw UsageError("Invalid value for --db-cache-mb: must be non-negative, got $dbCacheMb")
+    }
+
     val repoDb = when {
-      rawDbPath != null -> DatabaseFactory.connectFile(rawDbPath.toString(), bulkInsert = true)
+      rawDbPath != null -> DatabaseFactory.connectFile(
+        path = rawDbPath.toString(),
+        cacheSizeKb = dbCacheMb * 1024,
+        bulkInsert = true
+      )
       serviceFactory != null -> DatabaseFactory.connectInMemory("test")
       else -> throw UsageError("Target database must be specified as an argument or via --db")
     }
@@ -271,7 +284,8 @@ class ScanCommand(
           totalFiles = metadata?.fileCount,
           totalBytes = metadata?.totalBytes,
           initialFiles = initialFiles,
-          initialBytes = initialBytes
+          initialBytes = initialBytes,
+          maxHashBytes = maxHashBytes
         )
       indicator.apply {
         setTotals(

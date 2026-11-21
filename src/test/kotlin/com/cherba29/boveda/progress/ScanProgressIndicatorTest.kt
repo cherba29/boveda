@@ -253,4 +253,106 @@ class ScanProgressIndicatorTest {
     indicator.finish()
     indicator.close()
   }
+
+  @Test
+  fun `MordantScanProgressIndicator tracks actual bytesHashed under maxHashBytes and symlinks`() {
+    val recorder = TerminalRecorder(outputInteractive = false)
+    val terminal = Terminal(terminalInterface = recorder)
+    var currentTime = 10_000_000_000L
+
+    val oneMb = 1024L * 1024L
+    val indicator = MordantScanProgressIndicator(
+      terminal = terminal,
+      timeProvider = { currentTime },
+      maxHashBytes = oneMb
+    )
+
+    // 100 MB logical file -> only 1 MB actually hashed under maxHashBytes = 1 MB
+    indicator.onFileProcessed(dummyFile(size = 100L * oneMb, pathStr = "movie.mkv"))
+    // Symlink -> 0 bytes hashed
+    indicator.onFileProcessed(
+      ScannedFile(
+        path = Path.of("link.mkv"),
+        relativePath = "link.mkv",
+        size = 32L,
+        hash = "symlink:abc",
+        isSymlink = true,
+        symlinkTarget = "movie.mkv"
+      )
+    )
+
+    currentTime += 1_000_000_000L // 1 second
+    indicator.finish()
+
+    val output = recorder.output()
+    assertTrue(output.contains("Scanned 2 files"), "Unexpected output: $output")
+    assertTrue(output.contains("100.00 MB; 1.00 MB hashed"), "Unexpected output: $output")
+    assertTrue(output.contains("2.0 files/s, 1.00 MB/s hashed"), "Unexpected output: $output")
+  }
+
+  @Test
+  fun `MordantScanProgressIndicator uses rolling window speed for live display and ETA`() {
+    val recorder = TerminalRecorder(
+      width = 140,
+      outputInteractive = true,
+      ansiLevel = AnsiLevel.TRUECOLOR
+    )
+    val terminal = Terminal(terminalInterface = recorder)
+    var currentTime = 0L
+    val oneMb = 1024L * 1024L
+
+    // Verify ScanProgressState ETA prefers rolling-window speed over stale cumulative average
+    val stateWithRolling = ScanProgressState(
+      filesProcessed = 108L,
+      bytesProcessed = 8L * oneMb,
+      totalFiles = 200L,
+      totalBytes = 200L * oneMb,
+      startTimeNanos = 0L,
+      timeProvider = { 6_000_000_000L },
+      bytesHashed = 8L * oneMb,
+      recentFilesPerSecond = 2.0,
+      recentHashedMegaBytesPerSecond = 2.0
+    )
+    // 92 remaining files at 2.0 files/s -> 46s ETA (not 92 / 18.0 = 5s)
+    assertEquals(46.0, stateWithRolling.etaSeconds)
+    assertEquals("eta 00:46", stateWithRolling.formattedEta)
+    assertEquals("2.0 files/s, 2.00 MB/s hashed", stateWithRolling.formattedLiveSpeed)
+
+    val indicator = MordantScanProgressIndicator(
+      terminal = terminal,
+      totalFiles = 200L,
+      totalBytes = 200L * oneMb,
+      timeProvider = { currentTime },
+      updateIntervalMillis = 0L,
+      maxHashBytes = oneMb,
+      windowMillis = 2_000L
+    )
+
+    // First 2 seconds: fast burst of 100 tiny files (50 files/s)
+    for (i in 1..100) {
+      currentTime = i * 20_000_000L // 20ms each -> reaches 2.0s at i=100
+      indicator.onFileProcessed(dummyFile(size = 1024L, pathStr = "tiny-$i.txt"))
+    }
+
+    // Next 4 seconds: slower 2 files/s of 1 MB files (window is 2s -> should reflect ~2.0 files/s)
+    for (i in 1..8) {
+      currentTime += 500_000_000L // 500ms each -> 2.0 files/s, 2.00 MB/s hashed
+      indicator.onFileProcessed(dummyFile(size = oneMb, pathStr = "big-$i.bin"))
+    }
+
+    val deadline = System.currentTimeMillis() + 1_000L
+    while (!recorder.output().contains("2.00 MB/s hashed") &&
+      System.currentTimeMillis() < deadline
+    ) {
+      Thread.sleep(20)
+    }
+    indicator.finish()
+
+    val output = recorder.output()
+    assertTrue(output.contains("2.0 files/s"), "Expected rolling 2.0 files/s in:\n$output")
+    assertTrue(
+      output.contains("2.00 MB/s hashed"),
+      "Expected rolling 2.00 MB/s hashed in:\n$output"
+    )
+  }
 }

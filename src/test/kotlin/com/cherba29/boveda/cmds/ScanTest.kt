@@ -562,4 +562,59 @@ class ScanTest {
       dbDir.toFile().deleteRecursively()
     }
   }
+
+  @Test
+  fun `scan skips redundant DB hash lookups on fresh DB and falls back after cache eviction`() {
+    val tempDir = Files.createTempDirectory("scan-skip-hash-lookup-dir")
+    try {
+      tempDir.resolve("a.txt").writeText("unique alpha")
+      tempDir.resolve("b.txt").writeText("unique beta")
+      tempDir.resolve("c.txt").writeText("unique alpha") // duplicate of a.txt
+      tempDir.resolve("d.txt").writeText("unique gamma")
+      tempDir.resolve("e.txt").writeText("unique delta")
+
+      // 1. Fresh DB with ample cache -> 0 redundant DB hash SELECT queries
+      val freshDb = DatabaseFactory.connectInMemory("fresh_no_lookup_${System.nanoTime()}")
+      val freshService = BovedaService(database = freshDb, batchSize = 2)
+      freshService.scanAndRecord(tempDir)
+      assertEquals(0L, freshService.dbHashLookupCount)
+      assertEquals(4, freshService.queryFiles().map { it.hash }.distinct().size)
+      assertEquals(2, freshService.findDuplicates().size)
+
+      // 2. Tiny cache (maxSize = 2) -> evictions trigger automatic fallback to DB hash lookups
+      val evictedDb = DatabaseFactory.connectInMemory("evict_fallback_${System.nanoTime()}")
+      val tinyCache = com.cherba29.boveda.cache.InMemoryDeduplicationCache(maxSize = 2)
+      val evictedService = BovedaService(database = evictedDb, cache = tinyCache, batchSize = 1)
+      evictedService.scanAndRecord(tempDir)
+      assertTrue(evictedService.dbHashLookupCount > 0L)
+      assertEquals(5, evictedService.queryFiles().size)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `scan command supports --db-cache-mb option and rejects negative values`() {
+    val tempDir = Files.createTempDirectory("scan-cache-mb-dir")
+    val dbDir = Files.createTempDirectory("scan-cache-mb-db")
+    try {
+      tempDir.resolve("doc.txt").writeText("hello")
+      val dbFile = dbDir.resolve("cache_mb_db")
+
+      val badRes = ScanCommand().test(
+        listOf("--db-cache-mb", "-1", tempDir.toString(), dbFile.toString())
+      )
+      assertNotEquals(0, badRes.statusCode)
+      assertTrue(badRes.output.contains("--db-cache-mb"))
+
+      val okRes = ScanCommand().test(
+        listOf("--quiet", "--db-cache-mb", "32", tempDir.toString(), dbFile.toString())
+      )
+      assertEquals(0, okRes.statusCode)
+      assertTrue(okRes.output.contains("Scanned 1 file"))
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
 }

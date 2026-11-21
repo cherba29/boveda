@@ -117,6 +117,8 @@ Options:
                           from the database on startup.
   --no-estimate           Skip the initial directory traversal that estimates
                           total file count and size.
+  --db-cache-mb=<int>     H2 in-memory page cache size in MB during scanning.
+                          Default is 64.
   -l, --log-level=(OFF|ERROR|WARN|WARNING|INFO|DEBUG|TRACE)
                           Logging level (OFF, ERROR, WARN, INFO, DEBUG, TRACE).
   -h, --help              Show this message and exit

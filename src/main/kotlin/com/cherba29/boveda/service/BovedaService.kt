@@ -105,6 +105,18 @@ class BovedaService(
     .build()
 
   /**
+   * True when [cache] is known to hold every row currently present in [RepoFiles] (e.g. after
+   * warming up a fresh or small DB without hitting [InMemoryDeduplicationCache.maxSize]).
+   * Allows [recordBatch] to skip redundant `SELECT ... WHERE hash IN (...)` DB index probes.
+   */
+  @Volatile
+  internal var cacheMirrorsAllDbFiles: Boolean = false
+
+  /** Diagnostic counter tracking how many DB hash lookup queries were executed in [recordBatch]. */
+  internal var dbHashLookupCount: Long = 0L
+    private set
+
+  /**
    * Resolves the parent folder path of [path] in normalized invariant-separator format.
    */
   fun getParentFolderPath(path: Path): String =
@@ -287,22 +299,31 @@ class BovedaService(
       if (missingFromCache.isNotEmpty()) {
         val uniqueMissing = missingFromCache.distinctBy { FileContentKey(it.size, it.hash) }
 
-        // Check if any missing files exist in DB (e.g. if cache was not pre-warmed or evicted)
-        val missingHashes = uniqueMissing.map { it.hash }.distinct()
-        for (chunk in missingHashes.chunked(500)) {
-          RepoFiles.select(RepoFiles.id, RepoFiles.size, RepoFiles.hash)
-            .where { RepoFiles.hash inList chunk }
-            .forEach { row ->
-              val key = FileContentKey(row[RepoFiles.size], row[RepoFiles.hash])
-              val entityId = row[RepoFiles.id]
-              batchFileIds[key] = entityId
-              cache.put(key.size, key.hash, entityId)
-            }
+        // Skip DB hash lookup when cache is guaranteed to mirror every row in RepoFiles with zero
+        // evictions (e.g. scanning into a fresh database before hitting the 250k LRU cap).
+        val canSkipDbHashLookup = cacheMirrorsAllDbFiles && !cache.hasEvictions()
+        if (!canSkipDbHashLookup) {
+          val missingHashes = uniqueMissing.map { it.hash }.distinct()
+          for (chunk in missingHashes.chunked(500)) {
+            dbHashLookupCount++
+            RepoFiles.select(RepoFiles.id, RepoFiles.size, RepoFiles.hash)
+              .where { RepoFiles.hash inList chunk }
+              .forEach { row ->
+                val key = FileContentKey(row[RepoFiles.size], row[RepoFiles.hash])
+                val entityId = row[RepoFiles.id]
+                batchFileIds[key] = entityId
+                cache.put(key.size, key.hash, entityId)
+              }
+          }
         }
 
         // Brand new files not in cache or DB
-        val brandNewFiles = uniqueMissing.filter {
-          FileContentKey(it.size, it.hash) !in batchFileIds
+        val brandNewFiles = if (canSkipDbHashLookup) {
+          uniqueMissing
+        } else {
+          uniqueMissing.filter {
+            FileContentKey(it.size, it.hash) !in batchFileIds
+          }
         }
         if (brandNewFiles.isNotEmpty()) {
           val insertedRows = RepoFiles.batchInsert(
@@ -318,6 +339,9 @@ class BovedaService(
             batchFileIds[key] = entityId
             cache.put(key.size, key.hash, entityId)
           }
+        }
+        if (cache.hasEvictions()) {
+          cacheMirrorsAllDbFiles = false
         }
       }
 
@@ -469,6 +493,7 @@ class BovedaService(
     }
     snapshot.delete()
     folderCache.asMap().keys.removeIf { it.first == snapshotId }
+    cacheMirrorsAllDbFiles = false
     true
   }
 
@@ -969,9 +994,19 @@ class BovedaService(
     onPhase: ((ScanPhase) -> Unit)? = null,
     onFileScanned: ((ScannedFile) -> Unit)? = null
   ): RepoSnapshot {
-    if (deduplicateFiles && warmUpCache) {
-      onPhase?.invoke(ScanPhase.WARMING_CACHE)
-      cache.warmUp(database)
+    if (deduplicateFiles) {
+      if (warmUpCache) {
+        onPhase?.invoke(ScanPhase.WARMING_CACHE)
+        val loaded = cache.warmUp(database)
+        cacheMirrorsAllDbFiles = cache is InMemoryDeduplicationCache &&
+          !cache.hasEvictions() &&
+          loaded.toLong() < cache.maxSize
+      } else {
+        val dbFilesEmpty = transaction(database) {
+          RepoFiles.select(RepoFiles.id).limit(1).empty()
+        }
+        cacheMirrorsAllDbFiles = dbFilesEmpty && !cache.hasEvictions()
+      }
     }
 
     val snapshot = if (resumeSnapshotId != null) {

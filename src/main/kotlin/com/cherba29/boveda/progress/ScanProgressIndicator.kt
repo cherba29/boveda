@@ -28,12 +28,15 @@ import kotlin.time.Duration.Companion.nanoseconds
  * Snapshot of progress metrics while scanning and ingesting files.
  *
  * @property filesProcessed The total number of files scanned and ingested so far.
- * @property bytesProcessed The total byte size of files processed so far.
+ * @property bytesProcessed The total logical byte size of files cataloged so far.
  * @property totalFiles The expected total number of files discovered beforehand, or null if unknown.
  * @property totalBytes The expected total byte size discovered beforehand, or null if unknown.
  * @property startTimeNanos The timestamp in nanoseconds when scanning started.
  * @property action The status description prefix (e.g. "Scanning & ingesting:").
  * @property timeProvider Supplier of current timestamp in nanoseconds (customizable for deterministic testing).
+ * @property bytesHashed Actual bytes read and hashed from disk (respecting `--max-hash-bytes`; 0 for symlinks).
+ * @property recentFilesPerSecond Rolling-window files/s over the recent sampling interval, or null.
+ * @property recentHashedMegaBytesPerSecond Rolling-window hashed MB/s over the recent interval, or null.
  */
 data class ScanProgressState(
   val filesProcessed: Long = 0L,
@@ -42,7 +45,10 @@ data class ScanProgressState(
   val totalBytes: Long? = null,
   val startTimeNanos: Long = System.nanoTime(),
   val action: String = "Scanning & ingesting:",
-  val timeProvider: () -> Long = { System.nanoTime() }
+  val timeProvider: () -> Long = { System.nanoTime() },
+  val bytesHashed: Long = bytesProcessed,
+  val recentFilesPerSecond: Double? = null,
+  val recentHashedMegaBytesPerSecond: Double? = null
 ) {
   val elapsedNanos: Long
     get() = (timeProvider() - startTimeNanos).coerceAtLeast(0L)
@@ -54,10 +60,18 @@ data class ScanProgressState(
   val filesPerSecond: Double
     get() = if (elapsedSeconds > 0.000001) filesProcessed / elapsedSeconds else 0.0
 
-  /** Average ingestion speed in megabytes per second (using binary megabyte: 1,048,576 bytes). */
+  /** Average logical storage scan speed in MB/s (using binary megabyte: 1,048,576 bytes). */
   val megaBytesPerSecond: Double
     get() = if (elapsedSeconds > 0.000001) {
       (bytesProcessed / (1024.0 * 1024.0)) / elapsedSeconds
+    } else {
+      0.0
+    }
+
+  /** Average actual hashed read throughput in MB/s (respecting `--max-hash-bytes`). */
+  val hashedMegaBytesPerSecond: Double
+    get() = if (elapsedSeconds > 0.000001) {
+      (bytesHashed / (1024.0 * 1024.0)) / elapsedSeconds
     } else {
       0.0
     }
@@ -80,8 +94,8 @@ data class ScanProgressState(
     }
 
   /**
-   * Estimated remaining time in seconds based on file processing speed (falling back to byte
-   * processing speed if file count is unavailable), or null if indeterminate.
+   * Estimated remaining time in seconds based on rolling (or average) file processing speed
+   * (falling back to byte processing speed if file count is unavailable), or null if indeterminate.
    */
   val etaSeconds: Double?
     get() = when {
@@ -90,7 +104,8 @@ data class ScanProgressState(
         if (remainingFiles == 0L) {
           0.0
         } else {
-          if (filesPerSecond > 0.0) remainingFiles / filesPerSecond else null
+          val effectiveFilesPerSec = recentFilesPerSecond?.takeIf { it > 0.0 } ?: filesPerSecond
+          if (effectiveFilesPerSec > 0.0) remainingFiles / effectiveFilesPerSec else null
         }
       }
       totalBytes != null -> {
@@ -147,13 +162,34 @@ data class ScanProgressState(
       )
     }
 
-  /** Human-readable string representation of average ingestion speeds. */
+  /** Human-readable string representation of average logical ingestion speeds. */
   val formattedSpeed: String
     get() = String.format(
       Locale.US,
       "%.1f files/s, %.2f MB/s",
       filesPerSecond,
       megaBytesPerSecond
+    )
+
+  /**
+   * Human-readable live speed using rolling-window rates when available (falling back to
+   * cumulative rates), reporting actual hashed read throughput in MB/s.
+   */
+  val formattedLiveSpeed: String
+    get() = String.format(
+      Locale.US,
+      "%.1f files/s, %.2f MB/s hashed",
+      recentFilesPerSecond ?: filesPerSecond,
+      recentHashedMegaBytesPerSecond ?: hashedMegaBytesPerSecond
+    )
+
+  /** Human-readable cumulative average speed for the final scan summary. */
+  val formattedSummarySpeed: String
+    get() = String.format(
+      Locale.US,
+      "%.1f files/s, %.2f MB/s hashed",
+      filesPerSecond,
+      hashedMegaBytesPerSecond
     )
 }
 
@@ -202,22 +238,38 @@ class MordantScanProgressIndicator(
   initialFiles: Long = 0L,
   initialBytes: Long = 0L,
   private val timeProvider: () -> Long = { System.nanoTime() },
-  updateIntervalMillis: Long = DEFAULT_UPDATE_INTERVAL_MILLIS
+  updateIntervalMillis: Long = DEFAULT_UPDATE_INTERVAL_MILLIS,
+  private val maxHashBytes: Long? = null,
+  windowMillis: Long = DEFAULT_RATE_WINDOW_MILLIS
 ) : ScanProgressIndicator {
 
   companion object {
     const val DEFAULT_UPDATE_INTERVAL_MILLIS = 100L
+    const val DEFAULT_RATE_WINDOW_MILLIS = 5_000L
+    private const val MIN_ROLLING_WINDOW_SECONDS = 0.25
   }
+
+  private data class RateSample(
+    val timestampNanos: Long,
+    val files: Long,
+    val bytesHashed: Long
+  )
 
   private val filesCount = AtomicLong(initialFiles)
   private val bytesCount = AtomicLong(initialBytes)
+  private val bytesHashedCount = AtomicLong(0L)
   private val totalFilesRef = AtomicReference<Long?>(totalFiles)
   private val totalBytesRef = AtomicReference<Long?>(totalBytes)
   private val actionRef = AtomicReference("Scanning & ingesting:")
   private val startNanos = timeProvider()
   private val lastUpdateNanos = AtomicLong(0L)
   private val updateIntervalNanos = updateIntervalMillis * 1_000_000L
+  private val windowNanos = windowMillis.coerceAtLeast(250L) * 1_000_000L
   private val finished = AtomicBoolean(false)
+  private val rateLock = Any()
+  private val rateSamples = ArrayDeque<RateSample>().apply {
+    addLast(RateSample(startNanos, initialFiles, 0L))
+  }
 
   private val isInteractive: Boolean = terminal.terminalInfo.outputInteractive
   private var executor: ExecutorService? = null
@@ -231,7 +283,7 @@ class MordantScanProgressIndicator(
         progressBar()
         percentage()
         text { context.formattedFiles }
-        text { "(${context.formattedSpeed})" }
+        text { "(${context.formattedLiveSpeed})" }
         timeRemaining(prefix = "eta ")
         timeElapsed()
       }
@@ -249,7 +301,7 @@ class MordantScanProgressIndicator(
       )
       val anim = layout.animateOnThread(
         terminal = terminal,
-        context = currentState(),
+        context = currentState(includeRollingRates = false),
         total = initialTotal,
         completed = initialCompleted,
         maker = MultiProgressBarWidgetMaker
@@ -270,15 +322,61 @@ class MordantScanProgressIndicator(
     else -> files to null
   }
 
-  private fun currentState(action: String = actionRef.get()): ScanProgressState {
+  private fun hashedBytesForFile(file: ScannedFile): Long = when {
+    file.isSymlink -> 0L
+    maxHashBytes != null -> minOf(file.size, maxHashBytes)
+    else -> file.size
+  }
+
+  private fun recordAndComputeRollingRates(
+    nowNanos: Long,
+    files: Long,
+    hashedBytes: Long
+  ): Pair<Double?, Double?> {
+    synchronized(rateLock) {
+      if (rateSamples.isEmpty() || nowNanos > rateSamples.last().timestampNanos) {
+        rateSamples.addLast(RateSample(nowNanos, files, hashedBytes))
+      } else {
+        rateSamples[rateSamples.lastIndex] = RateSample(nowNanos, files, hashedBytes)
+      }
+      while (rateSamples.size > 2 && nowNanos - rateSamples[1].timestampNanos >= windowNanos) {
+        rateSamples.removeFirst()
+      }
+      val oldest = rateSamples.first()
+      val dtSeconds = (nowNanos - oldest.timestampNanos) / 1_000_000_000.0
+      if (dtSeconds < MIN_ROLLING_WINDOW_SECONDS) {
+        return null to null
+      }
+      val recentFiles = (files - oldest.files).coerceAtLeast(0L) / dtSeconds
+      val recentHashedMb =
+        ((hashedBytes - oldest.bytesHashed).coerceAtLeast(0L) / (1024.0 * 1024.0)) / dtSeconds
+      return recentFiles to recentHashedMb
+    }
+  }
+
+  private fun currentState(
+    action: String = actionRef.get(),
+    includeRollingRates: Boolean = true
+  ): ScanProgressState {
+    val files = filesCount.get()
+    val bytes = bytesCount.get()
+    val hashed = bytesHashedCount.get()
+    val (recentFiles, recentHashedMb) = if (includeRollingRates) {
+      recordAndComputeRollingRates(timeProvider(), files, hashed)
+    } else {
+      null to null
+    }
     return ScanProgressState(
-      filesProcessed = filesCount.get(),
-      bytesProcessed = bytesCount.get(),
+      filesProcessed = files,
+      bytesProcessed = bytes,
       totalFiles = totalFilesRef.get(),
       totalBytes = totalBytesRef.get(),
       startTimeNanos = startNanos,
       action = action,
-      timeProvider = timeProvider
+      timeProvider = timeProvider,
+      bytesHashed = hashed,
+      recentFilesPerSecond = recentFiles,
+      recentHashedMegaBytesPerSecond = recentHashedMb
     )
   }
 
@@ -293,7 +391,7 @@ class MordantScanProgressIndicator(
         totalBytes = totalBytesRef.get()
       )
       animator?.update {
-        context = currentState(action = action)
+        context = currentState(action = action, includeRollingRates = false)
         completed = currentCompleted
         total = currentTotal
       }
@@ -309,7 +407,13 @@ class MordantScanProgressIndicator(
     initialFiles: Long,
     initialBytes: Long
   ) {
-    if (initialFiles > 0L) filesCount.set(initialFiles)
+    if (initialFiles > 0L) {
+      filesCount.set(initialFiles)
+      synchronized(rateLock) {
+        rateSamples.clear()
+        rateSamples.addLast(RateSample(timeProvider(), initialFiles, bytesHashedCount.get()))
+      }
+    }
     if (initialBytes > 0L) bytesCount.set(initialBytes)
     totalFilesRef.set(totalFiles)
     totalBytesRef.set(totalBytes)
@@ -321,7 +425,7 @@ class MordantScanProgressIndicator(
         totalBytes = totalBytes
       )
       animator?.update {
-        context = currentState()
+        context = currentState(includeRollingRates = false)
         completed = currentCompleted
         total = currentTotal
       }
@@ -332,12 +436,13 @@ class MordantScanProgressIndicator(
     if (finished.get()) return
     val count = filesCount.incrementAndGet()
     val bytes = bytesCount.addAndGet(file.size)
+    val hashed = bytesHashedCount.addAndGet(hashedBytesForFile(file))
 
     if (isInteractive) {
+      val now = timeProvider()
       val shouldUpdate = if (updateIntervalNanos <= 0L) {
         true
       } else {
-        val now = timeProvider()
         val last = lastUpdateNanos.get()
         (last == 0L || now - last >= updateIntervalNanos) &&
           lastUpdateNanos.compareAndSet(last, now)
@@ -351,6 +456,7 @@ class MordantScanProgressIndicator(
           totalFiles = tFiles,
           totalBytes = tBytes
         )
+        val (recentFiles, recentHashedMb) = recordAndComputeRollingRates(now, count, hashed)
 
         animator?.update {
           context = ScanProgressState(
@@ -360,7 +466,10 @@ class MordantScanProgressIndicator(
             totalBytes = tBytes,
             startTimeNanos = startNanos,
             action = actionRef.get(),
-            timeProvider = timeProvider
+            timeProvider = timeProvider,
+            bytesHashed = hashed,
+            recentFilesPerSecond = recentFiles,
+            recentHashedMegaBytesPerSecond = recentHashedMb
           )
           completed = currentCompleted
           total = currentTotal
@@ -372,7 +481,7 @@ class MordantScanProgressIndicator(
   override fun finish() {
     if (!finished.compareAndSet(false, true)) return
 
-    val state = currentState(action = "Scanned:")
+    val state = currentState(action = "Scanned:", includeRollingRates = false)
     val duration = (timeProvider() - startNanos).coerceAtLeast(0L).nanoseconds
 
     if (isInteractive) {
@@ -386,11 +495,16 @@ class MordantScanProgressIndicator(
       String.format(Locale.US, "%,d files", state.filesProcessed)
     }
 
+    val storageSummary = if (state.bytesHashed != state.bytesProcessed) {
+      "${formatBytesShort(state.bytesProcessed)}; ${formatBytesShort(state.bytesHashed)} hashed"
+    } else {
+      formatBytesShort(state.bytesProcessed)
+    }
+
     val prefix = if (isInteractive) terminal.theme.success("✔ ") else ""
     terminal.println(
-      "${prefix}Scanned $filesSummary (${formatBytesShort(
-        state.bytesProcessed
-      )}) in ${formatDuration(duration)} (${state.formattedSpeed})"
+      "${prefix}Scanned $filesSummary ($storageSummary) " +
+        "in ${formatDuration(duration)} (${state.formattedSummarySpeed})"
     )
   }
 }
