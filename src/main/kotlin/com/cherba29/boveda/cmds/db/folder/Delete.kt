@@ -104,6 +104,7 @@ class DeleteCommand(
         val pathStr = folderArgument.toString()
         val base = if (pathStr.endsWith(".mv.db")) pathStr.removeSuffix(".mv.db") else pathStr
         val isDb = !Files.isDirectory(folderArgument) &&
+          !Files.isSymbolicLink(folderArgument) &&
           (Files.exists(Path.of(base)) || Files.exists(Path.of("$base.mv.db")))
         if (isDb) {
           null to folderArgument
@@ -138,18 +139,29 @@ class DeleteCommand(
         )
       }
 
-      if (result.folderDeletedFromDisk) {
-        echo(
-          "Deleted folder from disk and database: ${result.path} " +
-            "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
-            "${result.filesDeletedFromDb} from database)"
-        )
-      } else {
-        echo(
-          "Deleted folder from database: ${result.path} " +
-            "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
-            "${result.filesDeletedFromDb} from database; directory not removed from disk)"
-        )
+      when {
+        result.isSymlink && result.folderDeletedFromDisk -> {
+          echo("Deleted symlink from disk and database (target preserved): ${result.path}")
+        }
+        result.isSymlink -> {
+          echo(
+            "Deleted symlink from database (not found on disk; target preserved): ${result.path}"
+          )
+        }
+        result.folderDeletedFromDisk -> {
+          echo(
+            "Deleted folder from disk and database: ${result.path} " +
+              "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
+              "${result.filesDeletedFromDb} from database)"
+          )
+        }
+        else -> {
+          echo(
+            "Deleted folder from database: ${result.path} " +
+              "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
+              "${result.filesDeletedFromDb} from database; directory not removed from disk)"
+          )
+        }
       }
     } else {
       val defaultSelector = InteractiveDuplicateFolderSelector(currentContext.terminal)
@@ -189,15 +201,24 @@ class DeleteCommand(
         val results = service.deleteDuplicateFolders(snapshot.id.value, selectedPaths)
         echo("Deleted ${results.size} duplicate folder(s):")
         for (res in results) {
-          if (res.folderDeletedFromDisk) {
-            echo(
-              "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed)"
-            )
-          } else {
-            echo(
-              "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed; " +
-                "directory not removed from disk)"
-            )
+          when {
+            res.isSymlink && res.folderDeletedFromDisk -> {
+              echo("  - ${res.path} [symlink] (target preserved)")
+            }
+            res.isSymlink -> {
+              echo("  - ${res.path} [symlink] (from db only, not found on disk; target preserved)")
+            }
+            res.folderDeletedFromDisk -> {
+              echo(
+                "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed)"
+              )
+            }
+            else -> {
+              echo(
+                "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed; " +
+                  "directory not removed from disk)"
+              )
+            }
           }
         }
       }

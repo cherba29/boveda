@@ -56,4 +56,6 @@ class RepoFileInstance(id: EntityID<Int>) : IntEntity(id) {
   var file by RepoFile referencedOn RepoFileInstances.file
   var path by RepoFileInstances.path
   var timestamp by RepoFileInstances.timestamp
+  var isSymlink by RepoFileInstances.isSymlink
+  var symlinkTarget by RepoFileInstances.symlinkTarget
 }

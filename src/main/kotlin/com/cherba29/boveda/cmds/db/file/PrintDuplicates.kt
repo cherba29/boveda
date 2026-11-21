@@ -93,7 +93,15 @@ class PrintDuplicatesCommand(
             "path=${record.path} rank=${record.duplicateRank} hash=${record.hash}"
         )
       }
-      if (duplicateCount == 0L) {
+      if (duplicateCount > 0L) {
+        service.forEachSymlinkToDuplicates(snapshot.id.value) { record ->
+          val target = record.symlinkTarget ?: ""
+          echo(
+            "snapshot=${record.snapshotId} size=${record.size} " +
+              "path=${record.path} [symlink -> $target]"
+          )
+        }
+      } else {
         echo("No duplicates found.")
       }
     }

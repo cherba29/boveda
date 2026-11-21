@@ -3,11 +3,10 @@ package com.cherba29.boveda.scanner
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
-import kotlin.io.path.fileSize
-import kotlin.io.path.getLastModifiedTime
+import java.nio.file.attribute.BasicFileAttributes
 import kotlin.io.path.invariantSeparatorsPathString
-import kotlin.io.path.isRegularFile
 import kotlin.io.path.walk
 
 /**
@@ -43,7 +42,16 @@ interface DirectoryScanner {
     scan(rootPath, algorithm)
   } else {
     scan(rootPath, algorithm).filterNot {
-      shouldSkip(DiscoveredFile(it.path, it.relativePath, it.size, it.lastModifiedTime))
+      shouldSkip(
+        DiscoveredFile(
+          it.path,
+          it.relativePath,
+          it.size,
+          it.lastModifiedTime,
+          it.isSymlink,
+          it.symlinkTarget
+        )
+      )
     }
   }
 }
@@ -81,9 +89,23 @@ class FileTreeDirectoryScanner(
     val effectiveMaxBytes = maxBytes ?: this.maxBytes
 
     return normalizedRoot.walk()
-      .filter { it.isRegularFile() }
       .mapNotNull { filePath ->
         val normalizedFilePath = filePath.normalize()
+        val attrs = try {
+          Files.readAttributes(
+            normalizedFilePath,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS
+          )
+        } catch (_: Exception) {
+          return@mapNotNull null
+        }
+
+        val isSymlink = attrs.isSymbolicLink
+        if (!isSymlink && !attrs.isRegularFile) {
+          return@mapNotNull null
+        }
+
         val relative = normalizedRoot.relativize(
           normalizedFilePath
         ).invariantSeparatorsPathString
@@ -92,14 +114,11 @@ class FileTreeDirectoryScanner(
         } else {
           normalizedFilePath.invariantSeparatorsPathString
         }
-        val size = try {
-          normalizedFilePath.fileSize()
-        } catch (_: Exception) {
-          0L
-        }
-        val lastModified = try {
-          normalizedFilePath.getLastModifiedTime()
-        } catch (_: Exception) {
+        val size = attrs.size()
+        val lastModified = attrs.lastModifiedTime()
+        val symlinkTarget = if (isSymlink) {
+          SymlinkUtils.resolveTarget(normalizedFilePath)
+        } else {
           null
         }
 
@@ -107,21 +126,29 @@ class FileTreeDirectoryScanner(
           path = normalizedFilePath,
           relativePath = relativePath,
           size = size,
-          lastModifiedTime = lastModified
+          lastModifiedTime = lastModified,
+          isSymlink = isSymlink,
+          symlinkTarget = symlinkTarget
         )
 
         if (shouldSkip != null && shouldSkip(discovered)) {
           return@mapNotNull null
         }
 
-        val hash = hasher.computeHash(normalizedFilePath.toFile(), algorithm, effectiveMaxBytes)
+        val hash = if (isSymlink) {
+          SymlinkUtils.computeSymlinkHash(symlinkTarget)
+        } else {
+          hasher.computeHash(normalizedFilePath.toFile(), algorithm, effectiveMaxBytes)
+        }
 
         ScannedFile(
           path = normalizedFilePath,
           relativePath = relativePath,
           size = size,
           hash = hash,
-          lastModifiedTime = lastModified
+          lastModifiedTime = lastModified,
+          isSymlink = isSymlink,
+          symlinkTarget = symlinkTarget
         )
       }
   }

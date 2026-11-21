@@ -16,6 +16,7 @@ A vault of documents, images, and other files. Boveda scans directory hierarchie
 - **File-Level Duplication Statistics (`db file print-duplicates`)**: Uses SQL window functions (`ROW_NUMBER() OVER(PARTITION BY hash ORDER BY path)`) and outputs a statistical report including total files/storage scanned, wasted duplicate storage, top 10 duplicate groups ordered by combined duplicate space, and a Mordant-rendered 10% percentile deciles table.
 - **Folder-Level Duplicate Analysis (`db folder print-duplicates`)**: Identifies top folder pairs sharing duplicate files, showing shared vs. differing file counts, duplicated storage percentages, and the largest duplicated files in each pair.
 - **Safe & Interactive Duplicate Deletion (`db file delete`, `db folder delete`)**: Delete specific duplicate files or 100% matching duplicate folders from disk and database (refusing to delete non-duplicated entries unless `--force` is passed) or launch interactive terminal selectors to reclaim space starting from the largest duplicate groups.
+- **Cross-Platform Symbolic Link Support (Linux, macOS, Windows)**: Symbolic links are recorded using their actual link size (never following targets or treating symlinks as duplicates). Duplicate reports (`db file print-duplicates`, `db folder print-duplicates`) and interactive deletion selectors (`db file delete`, `db folder delete`) display associated symlinks clearly marked as `[symlink -> <target>]`, allowing you to delete just the symlink while preserving its target file or folder.
 - **Snapshot Management (`db snapshots list`, `db snapshots delete`)**: Inspect all recorded snapshots in a formatted table showing snapshot ID, root path, file counts, total storage size, and completion status, or delete snapshots with automatic cascade cleanup of orphaned records.
 - **Pre-Scan Estimation & Live Mordant Progress Bar**: Displays an animated estimation spinner before scanning (skippable via `--no-estimate`) and, during `--quiet` scans, a throttled Mordant progress bar showing percentage, ETA, processed file counts, and live ingestion speeds (files/s and MB/s).
 - **Rich CLI with Clikt & GraalVM Native Image Ready**: Structured subcommand CLI with path validation, runtime log-level control, and GraalVM Native Image metadata for compiling a standalone native binary.
@@ -612,6 +613,8 @@ erDiagram
         int file_id FK
         varchar path
         bigint timestamp
+        boolean is_symlink
+        varchar symlink_target
     }
 ```
 
@@ -660,7 +663,8 @@ src/main/
     ├── scanner/
     │   ├── DirectoryMetadata.kt                     # Sequential & work-stealing pre-scan metadata estimators
     │   ├── DiscoveredFile.kt                        # Intermediate discovered file metadata
-    │   ├── ScannedFile.kt                           # File metadata DTO (path, size, hash, lastModified)
+    │   ├── ScannedFile.kt                           # File metadata DTO (path, size, hash, lastModified, symlink info)
+    │   ├── SymlinkUtils.kt                          # Cross-platform symlink target resolution & marker hashing
     │   ├── DirectoryScanner.kt                      # Scanner interface & FileTreeDirectoryScanner
     │   ├── ParallelDirectoryScanner.kt              # Multi-threaded producer-consumer scanner
     │   └── WorkStealingDirectoryScanner.kt          # Bounded work-stealing ForkJoinPool scanner

@@ -56,6 +56,7 @@ typealias FolderDuplicatePair = com.cherba29.boveda.model.FolderDuplicatePair
 typealias DuplicateFolderGroup = com.cherba29.boveda.model.DuplicateFolderGroup
 typealias FolderDeletionResult = com.cherba29.boveda.model.FolderDeletionResult
 typealias DuplicateFileEntry = com.cherba29.boveda.model.DuplicateFileEntry
+typealias SymlinkEntry = com.cherba29.boveda.model.SymlinkEntry
 
 /**
  * Entry point for scanning a directory, recording files into the database, and running queries.

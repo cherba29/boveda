@@ -21,29 +21,42 @@ class InteractiveDuplicateSelector(
   private val terminal: Terminal = Terminal()
 ) {
 
+  private data class SelectableItem(
+    val path: String,
+    val displayLabel: String
+  )
+
+  private fun buildItems(group: DuplicateGroup): List<SelectableItem> =
+    group.paths.map { path -> SelectableItem(path = path, displayLabel = path) } +
+      group.symlinkPaths.map { sym ->
+        SelectableItem(
+          path = sym.path,
+          displayLabel = "${sym.path} [symlink -> ${sym.target}]"
+        )
+      }
+
   /**
-   * Prompts the user to select one or more duplicate files from [group] to delete.
+   * Prompts the user to select one or more duplicate files (or symlinks) from [group] to delete.
    *
    * @return A list of paths chosen for deletion, an empty list if none chosen,
    *         or `null` if the user pressed Esc / cancelled.
    */
   fun selectDuplicates(group: DuplicateGroup): List<String>? {
-    val items = group.paths
+    val items = buildItems(group)
     if (items.isEmpty()) return emptyList()
 
     if (!terminal.terminalInfo.inputInteractive) {
-      return fallbackLinePrompt(group)
+      return fallbackLinePrompt(group, items)
     }
 
     return try {
-      interactivePrompt(group)
+      interactivePrompt(group, items)
     } catch (_: Exception) {
-      fallbackLinePrompt(group)
+      fallbackLinePrompt(group, items)
     }
   }
 
-  private fun interactivePrompt(group: DuplicateGroup): List<String>? {
-    val items = group.paths
+  private fun interactivePrompt(group: DuplicateGroup, items: List<SelectableItem>): List<String>? {
     val selected = BooleanArray(items.size) { false }
     var cursor = 0
 
@@ -61,16 +74,17 @@ class InteractiveDuplicateSelector(
     fun renderContent(): String {
       return buildString {
         appendLine(headerText)
-        items.forEachIndexed { index, path ->
+        items.forEachIndexed { index, item ->
           val isCursor = index == cursor
           val isSel = selected[index]
           val cursorPrefix = if (isCursor) cyan(bold("> ")) else "  "
           val check = if (isSel) brightRed(bold("[x]")) else "[ ]"
+          val label = item.displayLabel
           val styledPath = when {
-            isSel && isCursor -> brightRed(bold(path))
-            isSel -> brightRed(path)
-            isCursor -> bold(path)
-            else -> path
+            isSel && isCursor -> brightRed(bold(label))
+            isSel -> brightRed(label)
+            isCursor -> bold(label)
+            else -> label
           }
           appendLine("$cursorPrefix$check $styledPath")
         }
@@ -118,15 +132,17 @@ class InteractiveDuplicateSelector(
           }
           event.key == "Enter" || event.key == "\n" || event.key == "\r" -> {
             anim.clear()
-            return items.filterIndexed { index, _ -> selected[index] }
+            return items.filterIndexed { index, _ -> selected[index] }.map { it.path }
           }
         }
       }
     }
   }
 
-  private fun fallbackLinePrompt(group: DuplicateGroup): List<String>? {
-    val items = group.paths
+  private fun fallbackLinePrompt(
+    group: DuplicateGroup,
+    items: List<SelectableItem>
+  ): List<String>? {
     terminal.println("### ==== Largest Duplicate Group ==== ###")
     terminal.println(
       "Size: ${formatBytes(group.size)} | ${group.copyCount} copies | " +
@@ -135,8 +151,8 @@ class InteractiveDuplicateSelector(
     )
     terminal.println("Hash: ${group.hash}")
     terminal.println("Duplicate files:")
-    items.forEachIndexed { index, path ->
-      terminal.println("  ${index + 1}. $path")
+    items.forEachIndexed { index, item ->
+      terminal.println("  ${index + 1}. ${item.displayLabel}")
     }
     terminal.print(
       "Enter numbers to delete (e.g. 1, 2), 'all', 's'/'skip' to skip, or 'esc'/'q' to quit: "
@@ -149,7 +165,7 @@ class InteractiveDuplicateSelector(
       return null
     }
     if (line.equals("all", ignoreCase = true)) {
-      return items
+      return items.map { it.path }
     }
     if (line.isEmpty() ||
       line.equals("s", ignoreCase = true) ||
@@ -162,7 +178,7 @@ class InteractiveDuplicateSelector(
     for (part in parts) {
       val num = part.toIntOrNull()
       if (num != null && num in 1..items.size) {
-        val path = items[num - 1]
+        val path = items[num - 1].path
         if (path !in selected) {
           selected.add(path)
         }

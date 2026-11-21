@@ -103,7 +103,8 @@ class DeleteCommand(
       fileArgument != null && parentOrOptionDb == null -> {
         val pathStr = fileArgument.toString()
         val base = if (pathStr.endsWith(".mv.db")) pathStr.removeSuffix(".mv.db") else pathStr
-        val isDb = Files.exists(Path.of(base)) || Files.exists(Path.of("$base.mv.db"))
+        val isDb = !Files.isSymbolicLink(fileArgument) &&
+          (Files.exists(Path.of(base)) || Files.exists(Path.of("$base.mv.db")))
         if (isDb) {
           null to fileArgument
         } else {
@@ -135,10 +136,21 @@ class DeleteCommand(
         )
       }
 
-      if (result.deletedFromDisk) {
-        echo("Deleted file from disk and database: ${result.path}")
-      } else {
-        echo("Deleted file from database (not found on disk): ${result.path}")
+      when {
+        result.isSymlink && result.deletedFromDisk -> {
+          echo("Deleted symlink from disk and database (target preserved): ${result.path}")
+        }
+        result.isSymlink -> {
+          echo(
+            "Deleted symlink from database (not found on disk; target preserved): ${result.path}"
+          )
+        }
+        result.deletedFromDisk -> {
+          echo("Deleted file from disk and database: ${result.path}")
+        }
+        else -> {
+          echo("Deleted file from database (not found on disk): ${result.path}")
+        }
       }
     } else {
       val defaultSelector = InteractiveDuplicateSelector(currentContext.terminal)
@@ -178,10 +190,19 @@ class DeleteCommand(
         val results = service.deleteDuplicateFiles(snapshot.id.value, selectedPaths)
         echo("Deleted ${results.size} duplicate file(s):")
         for (res in results) {
-          if (res.deletedFromDisk) {
-            echo("  - ${res.path}")
-          } else {
-            echo("  - ${res.path} (from db only, not found on disk)")
+          when {
+            res.isSymlink && res.deletedFromDisk -> {
+              echo("  - ${res.path} [symlink] (target preserved)")
+            }
+            res.isSymlink -> {
+              echo("  - ${res.path} [symlink] (from db only, not found on disk; target preserved)")
+            }
+            res.deletedFromDisk -> {
+              echo("  - ${res.path}")
+            }
+            else -> {
+              echo("  - ${res.path} (from db only, not found on disk)")
+            }
           }
         }
       }

@@ -3,6 +3,7 @@ package com.cherba29.boveda.db
 import java.sql.Connection
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.SchemaUtils
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 /**
@@ -42,11 +43,22 @@ object DatabaseFactory {
   }
 
   /**
-   * Creates all required tables if they don't already exist.
+   * Creates all required tables if they don't already exist and migrates symlink columns
+   * on pre-existing databases.
    */
   fun initSchema(database: Database) {
     transaction(database) {
       SchemaUtils.create(RepoSnapshots, RepoFolders, RepoFiles, RepoFileInstances)
+      val conn = TransactionManager.current().connection.connection as Connection
+      conn.createStatement().use { stmt ->
+        stmt.execute(
+          "ALTER TABLE file_instances ADD COLUMN IF NOT EXISTS " +
+            "is_symlink BOOLEAN DEFAULT FALSE NOT NULL"
+        )
+        stmt.execute(
+          "ALTER TABLE file_instances ADD COLUMN IF NOT EXISTS symlink_target VARCHAR(1024)"
+        )
+      }
     }
   }
 

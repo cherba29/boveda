@@ -46,10 +46,13 @@ object RepoFileInstances : IntIdTable("file_instances") {
   val file = reference("file_id", RepoFiles)
   val path = varchar("path", 1024)
   val timestamp = long("timestamp").nullable()
+  val isSymlink = bool("is_symlink").default(false)
+  val symlinkTarget = varchar("symlink_target", 1024).nullable()
 
   init {
     index(isUnique = false, snapshot, file, folder)
     index(isUnique = false, snapshot, folder, file)
     index(isUnique = false, snapshot, path)
+    index(isUnique = false, snapshot, isSymlink, symlinkTarget)
   }
 }

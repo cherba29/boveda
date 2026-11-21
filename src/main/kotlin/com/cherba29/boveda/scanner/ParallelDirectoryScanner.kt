@@ -3,16 +3,15 @@ package com.cherba29.boveda.scanner
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.io.path.fileSize
-import kotlin.io.path.getLastModifiedTime
 import kotlin.io.path.invariantSeparatorsPathString
-import kotlin.io.path.isRegularFile
 import kotlin.io.path.walk
 
 /**
@@ -44,7 +43,9 @@ class ParallelDirectoryScanner(
       val path: Path,
       val relativePath: String,
       val size: Long,
-      val lastModifiedTime: FileTime?
+      val lastModifiedTime: FileTime?,
+      val isSymlink: Boolean = false,
+      val symlinkTarget: String? = null
     ) : WorkItem
 
     data object Done : WorkItem
@@ -104,8 +105,19 @@ class ParallelDirectoryScanner(
         try {
           for (filePath in normalizedRoot.walk()) {
             if (Thread.currentThread().isInterrupted) break
-            if (filePath.isRegularFile()) {
-              val normalizedFilePath = filePath.normalize()
+            val normalizedFilePath = filePath.normalize()
+            val attrs = try {
+              Files.readAttributes(
+                normalizedFilePath,
+                BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS
+              )
+            } catch (_: Exception) {
+              continue
+            }
+
+            val isSymlink = attrs.isSymbolicLink
+            if (isSymlink || attrs.isRegularFile) {
               val relative = normalizedRoot.relativize(
                 normalizedFilePath
               ).invariantSeparatorsPathString
@@ -114,14 +126,11 @@ class ParallelDirectoryScanner(
               } else {
                 normalizedFilePath.invariantSeparatorsPathString
               }
-              val size = try {
-                normalizedFilePath.fileSize()
-              } catch (_: Exception) {
-                0L
-              }
-              val lastModified = try {
-                normalizedFilePath.getLastModifiedTime()
-              } catch (_: Exception) {
+              val size = attrs.size()
+              val lastModified = attrs.lastModifiedTime()
+              val symlinkTarget = if (isSymlink) {
+                SymlinkUtils.resolveTarget(normalizedFilePath)
+              } else {
                 null
               }
 
@@ -129,7 +138,9 @@ class ParallelDirectoryScanner(
                 path = normalizedFilePath,
                 relativePath = relativePath,
                 size = size,
-                lastModifiedTime = lastModified
+                lastModifiedTime = lastModified,
+                isSymlink = isSymlink,
+                symlinkTarget = symlinkTarget
               )
 
               if (shouldSkip == null || !shouldSkip(discovered)) {
@@ -138,7 +149,9 @@ class ParallelDirectoryScanner(
                     path = normalizedFilePath,
                     relativePath = relativePath,
                     size = size,
-                    lastModifiedTime = lastModified
+                    lastModifiedTime = lastModified,
+                    isSymlink = isSymlink,
+                    symlinkTarget = symlinkTarget
                   )
                 )
               }
@@ -169,13 +182,19 @@ class ParallelDirectoryScanner(
                 break
               }
               if (item is WorkItem.FileItem) {
-                val hash = hasher.computeHash(item.path.toFile(), algorithm, effectiveMaxBytes)
+                val hash = if (item.isSymlink) {
+                  SymlinkUtils.computeSymlinkHash(item.symlinkTarget)
+                } else {
+                  hasher.computeHash(item.path.toFile(), algorithm, effectiveMaxBytes)
+                }
                 val scannedFile = ScannedFile(
                   path = item.path,
                   relativePath = item.relativePath,
                   size = item.size,
                   hash = hash,
-                  lastModifiedTime = item.lastModifiedTime
+                  lastModifiedTime = item.lastModifiedTime,
+                  isSymlink = item.isSymlink,
+                  symlinkTarget = item.symlinkTarget
                 )
                 resultQueue.put(ResultItem.Success(scannedFile))
               }

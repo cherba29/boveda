@@ -3,7 +3,9 @@ package com.cherba29.boveda.scanner
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ForkJoinPool
@@ -12,8 +14,6 @@ import java.util.concurrent.RecursiveAction
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Predicate
-import kotlin.io.path.fileSize
-import kotlin.io.path.getLastModifiedTime
 import kotlin.io.path.invariantSeparatorsPathString
 
 /**
@@ -76,13 +76,19 @@ class WorkStealingDirectoryScanner(
       for (file in files) {
         if (Thread.currentThread().isInterrupted) return
         try {
-          val hash = hasher.computeHash(file.path.toFile(), algorithm, maxBytes)
+          val hash = if (file.isSymlink) {
+            SymlinkUtils.computeSymlinkHash(file.symlinkTarget)
+          } else {
+            hasher.computeHash(file.path.toFile(), algorithm, maxBytes)
+          }
           val scanned = ScannedFile(
             path = file.path,
             relativePath = file.relativePath,
             size = file.size,
             hash = hash,
-            lastModifiedTime = file.lastModifiedTime
+            lastModifiedTime = file.lastModifiedTime,
+            isSymlink = file.isSymlink,
+            symlinkTarget = file.symlinkTarget
           )
           resultQueue.put(ResultItem.Success(scanned))
         } catch (e: Throwable) {
@@ -117,8 +123,38 @@ class WorkStealingDirectoryScanner(
           for (entry in stream) {
             if (Thread.currentThread().isInterrupted) return
             val normalizedEntry = entry.normalize()
+            val attrs = try {
+              Files.readAttributes(
+                normalizedEntry,
+                BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS
+              )
+            } catch (_: Exception) {
+              continue
+            }
 
-            if (Files.isDirectory(normalizedEntry) && !Files.isSymbolicLink(normalizedEntry)) {
+            if (attrs.isSymbolicLink) {
+              val relative = normalizedRoot.relativize(
+                normalizedEntry
+              ).invariantSeparatorsPathString
+              val relativePath = if (relative.isNotEmpty()) {
+                relative
+              } else {
+                normalizedEntry.invariantSeparatorsPathString
+              }
+              val symlinkTarget = SymlinkUtils.resolveTarget(normalizedEntry)
+              val discovered = DiscoveredFile(
+                path = normalizedEntry,
+                relativePath = relativePath,
+                size = attrs.size(),
+                lastModifiedTime = attrs.lastModifiedTime(),
+                isSymlink = true,
+                symlinkTarget = symlinkTarget
+              )
+              if (shouldSkip == null || !shouldSkip(discovered)) {
+                discoveredFiles.add(discovered)
+              }
+            } else if (attrs.isDirectory) {
               subDirTasks.add(
                 ScanDirectoryTask(
                   dir = normalizedEntry,
@@ -131,7 +167,7 @@ class WorkStealingDirectoryScanner(
                   maxBytes = maxBytes
                 )
               )
-            } else if (Files.isRegularFile(normalizedEntry)) {
+            } else if (attrs.isRegularFile) {
               val relative = normalizedRoot.relativize(
                 normalizedEntry
               ).invariantSeparatorsPathString
@@ -140,21 +176,13 @@ class WorkStealingDirectoryScanner(
               } else {
                 normalizedEntry.invariantSeparatorsPathString
               }
-              val size = try {
-                normalizedEntry.fileSize()
-              } catch (_: Exception) {
-                0L
-              }
-              val lastModified = try {
-                normalizedEntry.getLastModifiedTime()
-              } catch (_: Exception) {
-                null
-              }
               val discovered = DiscoveredFile(
                 path = normalizedEntry,
                 relativePath = relativePath,
-                size = size,
-                lastModifiedTime = lastModified
+                size = attrs.size(),
+                lastModifiedTime = attrs.lastModifiedTime(),
+                isSymlink = false,
+                symlinkTarget = null
               )
               if (shouldSkip == null || !shouldSkip(discovered)) {
                 discoveredFiles.add(discovered)

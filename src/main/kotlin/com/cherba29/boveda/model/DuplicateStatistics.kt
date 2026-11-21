@@ -15,7 +15,8 @@ data class DuplicateGroup(
   val hash: String,
   val size: Long,
   val copyCount: Int,
-  val paths: List<String>
+  val paths: List<String>,
+  val symlinkPaths: List<SymlinkEntry> = emptyList()
 ) {
   /** Total storage wasted by redundant copies (excluding the 1 original copy). */
   val wastedBytes: Long get() = (copyCount - 1L) * size

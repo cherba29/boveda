@@ -1,18 +1,33 @@
 package com.cherba29.boveda.model
 
 /**
+ * Represents a symbolic link associated with a file or folder in duplicate reports and selectors.
+ *
+ * @property path The normalized path of the symlink itself.
+ * @property target The normalized target path the symlink points to.
+ */
+data class SymlinkEntry(
+  val path: String,
+  val target: String
+)
+
+/**
  * Result model representing a file instance recorded in a repository snapshot.
  *
  * @property snapshotId The ID of the snapshot this instance belongs to.
  * @property path The recorded file path.
- * @property size The file size in bytes.
+ * @property size The file size in bytes (actual symlink size for symlinks).
  * @property hash The content hash string.
+ * @property isSymlink Whether this entry is a symbolic link.
+ * @property symlinkTarget Normalized target path if [isSymlink] is true.
  */
 data class FileRecord(
   val snapshotId: Int,
   val path: String,
   val size: Long,
-  val hash: String
+  val hash: String,
+  val isSymlink: Boolean = false,
+  val symlinkTarget: String? = null
 )
 
 /**
@@ -23,13 +38,17 @@ data class FileRecord(
  * @property size The file size in bytes.
  * @property hash The content hash string.
  * @property duplicateRank The 1-based row number partitioned by content hash. Ranks > 1 denote duplicates.
+ * @property isSymlink Whether this entry is a symbolic link.
+ * @property symlinkTarget Normalized target path if [isSymlink] is true.
  */
 data class FileRecordWithDuplicateRank(
   val snapshotId: Int,
   val path: String,
   val size: Long,
   val hash: String,
-  val duplicateRank: Long
+  val duplicateRank: Long,
+  val isSymlink: Boolean = false,
+  val symlinkTarget: String? = null
 )
 
 /**
@@ -61,5 +80,6 @@ data class FileDeletionResult(
   val path: String,
   val deletedFromDisk: Boolean,
   val deletedFromDb: Boolean,
-  val hasDuplicates: Boolean
+  val hasDuplicates: Boolean,
+  val isSymlink: Boolean = false
 )

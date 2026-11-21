@@ -47,7 +47,8 @@ data class FolderDuplicatePair(
   val totalStorage: Long,
   val duplicateFilesPercentage: Double,
   val duplicateStoragePercentage: Double,
-  val topDuplicateFiles: List<DuplicateFileEntry>
+  val topDuplicateFiles: List<DuplicateFileEntry>,
+  val symlinks: List<SymlinkEntry> = emptyList()
 )
 
 /**
@@ -64,7 +65,8 @@ data class DuplicateFolderGroup(
   val fileCount: Int,
   val folderBytes: Long,
   val paths: List<String>,
-  val sampleFiles: List<Pair<String, Long>> = emptyList()
+  val sampleFiles: List<Pair<String, Long>> = emptyList(),
+  val symlinkPaths: List<SymlinkEntry> = emptyList()
 ) {
   /** Number of identical folder copies in this group. */
   val copyCount: Int get() = paths.size
@@ -92,5 +94,6 @@ data class FolderDeletionResult(
   val filesDeletedFromDb: Int,
   val folderDeletedFromDisk: Boolean,
   val deletedFromDb: Boolean,
-  val hasMatchingDuplicate: Boolean
+  val hasMatchingDuplicate: Boolean,
+  val isSymlink: Boolean = false
 )

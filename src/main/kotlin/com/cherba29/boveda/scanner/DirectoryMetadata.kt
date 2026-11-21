@@ -14,7 +14,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.LongAdder
 import java.util.function.Predicate
-import kotlin.io.path.fileSize
 
 /**
  * Pre-computed metadata for a directory tree.
@@ -71,17 +70,9 @@ object FileTreeMetadataScanner : DirectoryMetadataScanner {
       rootPath.normalize(),
       object : SimpleFileVisitor<Path>() {
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-          if (attrs.isRegularFile) {
+          if (attrs.isRegularFile || attrs.isSymbolicLink) {
             fileCount++
             totalBytes += attrs.size()
-            onProgress(fileCount, totalBytes)
-          } else if (attrs.isSymbolicLink && Files.isRegularFile(file)) {
-            fileCount++
-            totalBytes += try {
-              file.fileSize()
-            } catch (_: Exception) {
-              0L
-            }
             onProgress(fileCount, totalBytes)
           }
           return FileVisitResult.CONTINUE
@@ -148,21 +139,17 @@ class WorkStealingMetadataScanner(
                 BasicFileAttributes::class.java,
                 LinkOption.NOFOLLOW_LINKS
               )
-              if (attrs.isDirectory) {
-                subTasks.add(ScanMetadataTask(normalized, filesCounter, bytesCounter, onProgress))
-              } else if (attrs.isRegularFile) {
+              if (attrs.isSymbolicLink) {
                 val size = attrs.size()
                 fileCount++
                 totalBytes += size
                 filesCounter.increment()
                 bytesCounter.add(size)
                 onProgress(filesCounter.sum(), bytesCounter.sum())
-              } else if (attrs.isSymbolicLink && Files.isRegularFile(normalized)) {
-                val size = try {
-                  normalized.fileSize()
-                } catch (_: Exception) {
-                  0L
-                }
+              } else if (attrs.isDirectory) {
+                subTasks.add(ScanMetadataTask(normalized, filesCounter, bytesCounter, onProgress))
+              } else if (attrs.isRegularFile) {
+                val size = attrs.size()
                 fileCount++
                 totalBytes += size
                 filesCounter.increment()

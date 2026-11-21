@@ -321,7 +321,12 @@ class ScanCommand(
         }
       ) { file ->
         if (!quiet) {
-          echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
+          if (file.isSymlink) {
+            val targetInfo = file.symlinkTarget ?: ""
+            echo("${file.lastModifiedTime} ${file.size} ${file.path} [symlink -> $targetInfo]")
+          } else {
+            echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
+          }
         } else {
           progressIndicator?.onFileProcessed(file)
         }
