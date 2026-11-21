@@ -1,5 +1,6 @@
 package com.cherba29.boveda.db
 
+import java.sql.Connection
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.SchemaUtils
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -46,6 +47,27 @@ object DatabaseFactory {
   fun initSchema(database: Database) {
     transaction(database) {
       SchemaUtils.create(RepoSnapshots, RepoFolders, RepoFiles, RepoFileInstances)
+    }
+  }
+
+  /**
+   * Explicitly flushes dirty MVStore pages and shuts down an H2 file-backed [database],
+   * avoiding an unexplained silent pause during JVM shutdown hooks.
+   */
+  fun shutdown(database: Database) {
+    val exposedConn = database.connector()
+    try {
+      val conn = exposedConn.connection as Connection
+      conn.autoCommit = true
+      conn.createStatement().use { stmt ->
+        stmt.execute("SHUTDOWN")
+      }
+    } finally {
+      try {
+        exposedConn.close()
+      } catch (_: Exception) {
+        // H2 closes the underlying connection as part of SHUTDOWN
+      }
     }
   }
 }

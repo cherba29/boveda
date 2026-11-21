@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.hash.parseByteSize
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.formatDuration
 import com.cherba29.boveda.progress.EstimatingProgressIndicator
 import com.cherba29.boveda.progress.MordantEstimatingProgressIndicator
 import com.cherba29.boveda.progress.MordantScanProgressIndicator
@@ -16,6 +17,7 @@ import com.cherba29.boveda.scanner.ParallelDirectoryScanner
 import com.cherba29.boveda.scanner.WorkStealingDirectoryScanner
 import com.cherba29.boveda.scanner.WorkStealingMetadataScanner
 import com.cherba29.boveda.service.BovedaService
+import com.cherba29.boveda.service.ScanPhase
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.UsageError
@@ -31,6 +33,7 @@ import com.github.ajalt.clikt.parameters.types.path
 import com.github.ajalt.mordant.terminal.Terminal
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.time.Duration.Companion.nanoseconds
 import org.jetbrains.exposed.v1.jdbc.Database
 
 /**
@@ -252,6 +255,7 @@ class ScanCommand(
     }
 
     val existingEntries = if (continueId != null) {
+      echo("Loading existing snapshot entries...")
       service.getSnapshotFileEntries(continueId)
     } else {
       emptyMap()
@@ -280,12 +284,41 @@ class ScanCommand(
       null
     }
 
+    var finalizeStartNanos = 0L
     try {
       service.scanAndRecord(
         rootPath = targetDirectory,
         algorithm = algorithm,
         resumeSnapshotId = continueId,
-        maxBytes = maxHashBytes
+        maxBytes = maxHashBytes,
+        onPhase = { phase ->
+          when (phase) {
+            ScanPhase.WARMING_CACHE -> {
+              if (quiet) {
+                progressIndicator?.setStatus("Warming up cache:")
+              } else {
+                echo("Warming up deduplication cache...")
+              }
+            }
+            ScanPhase.LOADING_EXISTING_SNAPSHOT -> {
+              progressIndicator?.setStatus("Loading snapshot:")
+            }
+            ScanPhase.SCANNING -> {
+              progressIndicator?.setStatus("Scanning & ingesting:")
+            }
+            ScanPhase.UPDATING_FOLDER_STATISTICS -> {
+              progressIndicator?.finish()
+              finalizeStartNanos = System.nanoTime()
+              echo("Updating folder statistics and finalizing snapshot...")
+            }
+            ScanPhase.COMPLETED -> {
+              if (finalizeStartNanos > 0L) {
+                val finalizeDuration = (System.nanoTime() - finalizeStartNanos).nanoseconds
+                echo("Snapshot finalized in ${formatDuration(finalizeDuration)}.")
+              }
+            }
+          }
+        }
       ) { file ->
         if (!quiet) {
           echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")
@@ -295,6 +328,14 @@ class ScanCommand(
       }
     } finally {
       progressIndicator?.finish()
+    }
+
+    if (rawDbPath != null) {
+      echo("Flushing and closing database...")
+      val closeStartNanos = System.nanoTime()
+      DatabaseFactory.shutdown(repoDb)
+      val closeDuration = (System.nanoTime() - closeStartNanos).nanoseconds
+      echo("Database closed in ${formatDuration(closeDuration)}.")
     }
   }
 }

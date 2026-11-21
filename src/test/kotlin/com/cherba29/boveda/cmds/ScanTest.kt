@@ -148,6 +148,10 @@ class ScanTest {
       assertEquals(0, result.statusCode)
       assertTrue(result.output.contains("Scanning directory: $tempDir"))
       assertTrue(result.output.contains("Scanned 1 file"))
+      assertTrue(result.output.contains("Updating folder statistics and finalizing snapshot..."))
+      assertTrue(result.output.contains("Snapshot finalized in"))
+      assertTrue(result.output.contains("Flushing and closing database..."))
+      assertTrue(result.output.contains("Database closed in"))
     } finally {
       tempDir.toFile().deleteRecursively()
       dbDir.toFile().deleteRecursively()

@@ -213,7 +213,10 @@ class ScanProgressIndicatorTest {
     currentTime += 1_000_000_000L
     indicator.onFileProcessed(dummyFile(size = 9_000L, pathStr = "huge.bin"))
 
-    Thread.sleep(100)
+    val deadline = System.currentTimeMillis() + 1_000L
+    while (!recorder.output().contains("25%") && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20)
+    }
     indicator.finish()
 
     val output = recorder.output()

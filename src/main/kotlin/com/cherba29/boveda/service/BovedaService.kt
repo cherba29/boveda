@@ -57,6 +57,17 @@ import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 /**
+ * Lifecycle phases reported during [BovedaService.scanAndRecord].
+ */
+enum class ScanPhase {
+  WARMING_CACHE,
+  LOADING_EXISTING_SNAPSHOT,
+  SCANNING,
+  UPDATING_FOLDER_STATISTICS,
+  COMPLETED
+}
+
+/**
  * Service managing snapshot creation, file ingestion, and analytical database queries.
  *
  * @property database The Exposed [Database] instance.
@@ -771,9 +782,11 @@ class BovedaService(
     algorithm: String = "XXH3",
     resumeSnapshotId: Int? = null,
     maxBytes: Long? = null,
+    onPhase: ((ScanPhase) -> Unit)? = null,
     onFileScanned: ((ScannedFile) -> Unit)? = null
   ): RepoSnapshot {
     if (deduplicateFiles && warmUpCache) {
+      onPhase?.invoke(ScanPhase.WARMING_CACHE)
       cache.warmUp(database)
     }
 
@@ -790,6 +803,7 @@ class BovedaService(
     }
 
     val existingEntries = if (resumeSnapshotId != null) {
+      onPhase?.invoke(ScanPhase.LOADING_EXISTING_SNAPSHOT)
       getSnapshotFileEntries(resumeSnapshotId)
     } else {
       emptyMap()
@@ -800,6 +814,7 @@ class BovedaService(
       existing != null && isUnchanged(discovered, existing)
     }
 
+    onPhase?.invoke(ScanPhase.SCANNING)
     val scannedFiles = scanner.scan(
       rootPath = rootPath,
       algorithm = algorithm,
@@ -815,7 +830,9 @@ class BovedaService(
       recordFiles(snapshot, scannedFiles)
     }
 
+    onPhase?.invoke(ScanPhase.UPDATING_FOLDER_STATISTICS)
     completeSnapshot(snapshot)
+    onPhase?.invoke(ScanPhase.COMPLETED)
     return snapshot
   }
 

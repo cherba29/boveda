@@ -169,6 +169,9 @@ interface ScanProgressIndicator : AutoCloseable {
     setTotals(totalFiles, totalBytes)
   }
 
+  /** Updates the status/action label displayed by the progress indicator. */
+  fun setStatus(action: String) {}
+
   /** Called whenever a file has been discovered and processed. */
   fun onFileProcessed(file: ScannedFile)
 
@@ -210,6 +213,7 @@ class MordantScanProgressIndicator(
   private val bytesCount = AtomicLong(initialBytes)
   private val totalFilesRef = AtomicReference<Long?>(totalFiles)
   private val totalBytesRef = AtomicReference<Long?>(totalBytes)
+  private val actionRef = AtomicReference("Scanning & ingesting:")
   private val startNanos = timeProvider()
   private val lastUpdateNanos = AtomicLong(0L)
   private val updateIntervalNanos = updateIntervalMillis * 1_000_000L
@@ -266,7 +270,7 @@ class MordantScanProgressIndicator(
     else -> files to null
   }
 
-  private fun currentState(action: String = "Scanning & ingesting:"): ScanProgressState {
+  private fun currentState(action: String = actionRef.get()): ScanProgressState {
     return ScanProgressState(
       filesProcessed = filesCount.get(),
       bytesProcessed = bytesCount.get(),
@@ -276,6 +280,24 @@ class MordantScanProgressIndicator(
       action = action,
       timeProvider = timeProvider
     )
+  }
+
+  override fun setStatus(action: String) {
+    if (finished.get()) return
+    actionRef.set(action)
+    if (isInteractive) {
+      val (currentCompleted, currentTotal) = resolveProgress(
+        files = filesCount.get(),
+        bytes = bytesCount.get(),
+        totalFiles = totalFilesRef.get(),
+        totalBytes = totalBytesRef.get()
+      )
+      animator?.update {
+        context = currentState(action = action)
+        completed = currentCompleted
+        total = currentTotal
+      }
+    }
   }
 
   override fun setTotals(totalFiles: Long?, totalBytes: Long?) =
@@ -337,7 +359,7 @@ class MordantScanProgressIndicator(
             totalFiles = tFiles,
             totalBytes = tBytes,
             startTimeNanos = startNanos,
-            action = "Scanning & ingesting:",
+            action = actionRef.get(),
             timeProvider = timeProvider
           )
           completed = currentCompleted

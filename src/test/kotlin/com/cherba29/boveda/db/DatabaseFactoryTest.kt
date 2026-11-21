@@ -55,4 +55,25 @@ class DatabaseFactoryTest {
       assertTrue(RepoFileInstances.exists())
     }
   }
+
+  @Test
+  fun `shutdown flushes and closes file-backed database cleanly and allows reopening`() {
+    val tempDir = Files.createTempDirectory("boveda-h2-shutdown")
+    try {
+      val dbPath = tempDir.resolve("shutdown_db").toString()
+      val db = DatabaseFactory.connectFile(dbPath)
+      DatabaseFactory.shutdown(db)
+
+      val reopened = DatabaseFactory.connectFile(dbPath)
+      transaction(reopened) {
+        assertTrue(RepoSnapshots.exists())
+        assertTrue(RepoFolders.exists())
+        assertTrue(RepoFiles.exists())
+        assertTrue(RepoFileInstances.exists())
+      }
+      DatabaseFactory.shutdown(reopened)
+    } finally {
+      tempDir.toFile().deleteRecursively()
+    }
+  }
 }
