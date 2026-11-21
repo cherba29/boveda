@@ -2,9 +2,11 @@ package com.cherba29.boveda.scanner
 
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.BlockingQueue
@@ -79,7 +81,7 @@ class WorkStealingDirectoryScanner(
           val hash = if (file.isSymlink) {
             SymlinkUtils.computeSymlinkHash(file.symlinkTarget)
           } else {
-            hasher.computeHash(file.path.toFile(), algorithm, maxBytes)
+            hasher.computeHash(file.path, algorithm, maxBytes, file.size)
           }
           val scanned = ScannedFile(
             path = file.path,
@@ -119,77 +121,91 @@ class WorkStealingDirectoryScanner(
       val discoveredFiles = mutableListOf<DiscoveredFile>()
 
       try {
-        Files.newDirectoryStream(dir).use { stream ->
-          for (entry in stream) {
-            if (Thread.currentThread().isInterrupted) return
-            val normalizedEntry = entry.normalize()
-            val attrs = try {
-              Files.readAttributes(
-                normalizedEntry,
-                BasicFileAttributes::class.java,
-                LinkOption.NOFOLLOW_LINKS
-              )
-            } catch (_: Exception) {
-              continue
+        val walkDir = if (dir == normalizedRoot && Files.isSymbolicLink(dir)) {
+          dir.toRealPath()
+        } else {
+          dir
+        }
+        val remapPrefix = walkDir != dir
+
+        // Using Files.walkFileTree(depth = 1) reuses Windows BasicFileAttributesHolder
+        // populated by FindNextFileW, avoiding an extra GetFileAttributesExW syscall per entry.
+        Files.walkFileTree(
+          walkDir,
+          emptySet(),
+          1,
+          object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+              if (Thread.currentThread().isInterrupted) return FileVisitResult.TERMINATE
+              if (file == walkDir) return FileVisitResult.CONTINUE
+              val normalizedEntry = if (remapPrefix) {
+                dir.resolve(file.fileName).normalize()
+              } else {
+                file.normalize()
+              }
+
+              if (attrs.isSymbolicLink) {
+                val relative = normalizedRoot.relativize(
+                  normalizedEntry
+                ).invariantSeparatorsPathString
+                val relativePath = if (relative.isNotEmpty()) {
+                  relative
+                } else {
+                  normalizedEntry.invariantSeparatorsPathString
+                }
+                val symlinkTarget = SymlinkUtils.resolveTarget(normalizedEntry)
+                val discovered = DiscoveredFile(
+                  path = normalizedEntry,
+                  relativePath = relativePath,
+                  size = attrs.size(),
+                  lastModifiedTime = attrs.lastModifiedTime(),
+                  isSymlink = true,
+                  symlinkTarget = symlinkTarget
+                )
+                if (shouldSkip == null || !shouldSkip(discovered)) {
+                  discoveredFiles.add(discovered)
+                }
+              } else if (attrs.isDirectory) {
+                subDirTasks.add(
+                  ScanDirectoryTask(
+                    dir = normalizedEntry,
+                    normalizedRoot = normalizedRoot,
+                    algorithm = algorithm,
+                    hasher = hasher,
+                    resultQueue = resultQueue,
+                    fileChunkSize = fileChunkSize,
+                    shouldSkip = shouldSkip,
+                    maxBytes = maxBytes
+                  )
+                )
+              } else if (attrs.isRegularFile) {
+                val relative = normalizedRoot.relativize(
+                  normalizedEntry
+                ).invariantSeparatorsPathString
+                val relativePath = if (relative.isNotEmpty()) {
+                  relative
+                } else {
+                  normalizedEntry.invariantSeparatorsPathString
+                }
+                val discovered = DiscoveredFile(
+                  path = normalizedEntry,
+                  relativePath = relativePath,
+                  size = attrs.size(),
+                  lastModifiedTime = attrs.lastModifiedTime(),
+                  isSymlink = false,
+                  symlinkTarget = null
+                )
+                if (shouldSkip == null || !shouldSkip(discovered)) {
+                  discoveredFiles.add(discovered)
+                }
+              }
+              return FileVisitResult.CONTINUE
             }
 
-            if (attrs.isSymbolicLink) {
-              val relative = normalizedRoot.relativize(
-                normalizedEntry
-              ).invariantSeparatorsPathString
-              val relativePath = if (relative.isNotEmpty()) {
-                relative
-              } else {
-                normalizedEntry.invariantSeparatorsPathString
-              }
-              val symlinkTarget = SymlinkUtils.resolveTarget(normalizedEntry)
-              val discovered = DiscoveredFile(
-                path = normalizedEntry,
-                relativePath = relativePath,
-                size = attrs.size(),
-                lastModifiedTime = attrs.lastModifiedTime(),
-                isSymlink = true,
-                symlinkTarget = symlinkTarget
-              )
-              if (shouldSkip == null || !shouldSkip(discovered)) {
-                discoveredFiles.add(discovered)
-              }
-            } else if (attrs.isDirectory) {
-              subDirTasks.add(
-                ScanDirectoryTask(
-                  dir = normalizedEntry,
-                  normalizedRoot = normalizedRoot,
-                  algorithm = algorithm,
-                  hasher = hasher,
-                  resultQueue = resultQueue,
-                  fileChunkSize = fileChunkSize,
-                  shouldSkip = shouldSkip,
-                  maxBytes = maxBytes
-                )
-              )
-            } else if (attrs.isRegularFile) {
-              val relative = normalizedRoot.relativize(
-                normalizedEntry
-              ).invariantSeparatorsPathString
-              val relativePath = if (relative.isNotEmpty()) {
-                relative
-              } else {
-                normalizedEntry.invariantSeparatorsPathString
-              }
-              val discovered = DiscoveredFile(
-                path = normalizedEntry,
-                relativePath = relativePath,
-                size = attrs.size(),
-                lastModifiedTime = attrs.lastModifiedTime(),
-                isSymlink = false,
-                symlinkTarget = null
-              )
-              if (shouldSkip == null || !shouldSkip(discovered)) {
-                discoveredFiles.add(discovered)
-              }
-            }
+            override fun visitFileFailed(file: Path, exc: IOException?): FileVisitResult =
+              FileVisitResult.CONTINUE
           }
-        }
+        )
       } catch (e: Throwable) {
         if (e !is InterruptedException) {
           resultQueue.put(ResultItem.Failure(e))

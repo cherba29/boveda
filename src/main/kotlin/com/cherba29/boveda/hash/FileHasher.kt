@@ -2,9 +2,12 @@ package com.cherba29.boveda.hash
 
 import com.dynatrace.hash4j.hashing.HashValues
 import com.dynatrace.hash4j.hashing.Hashing
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
+import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 
@@ -39,6 +42,18 @@ interface FileHasher {
    */
   fun computeHash(path: Path, algorithm: String = "XXH3", maxBytes: Long? = null): String =
     computeHash(path.toFile(), algorithm, maxBytes)
+
+  /**
+   * Computes the hash of a file at [path] using the specified [algorithm], reading at most
+   * [maxBytes] and reusing [knownFileSize] when already obtained from directory traversal
+   * (avoiding redundant filesystem metadata syscalls such as exists/isFile/length).
+   */
+  fun computeHash(
+    path: Path,
+    algorithm: String = "XXH3",
+    maxBytes: Long? = null,
+    knownFileSize: Long? = null
+  ): String = computeHash(path, algorithm, maxBytes)
 
   /**
    * Computes the hash of an [inputStream] using the specified [algorithm].
@@ -116,6 +131,8 @@ open class MessageDigestFileHasher(
      * thresholds while remaining large enough to saturate NVMe/SSD sequential reads.
      */
     const val DEFAULT_BUFFER_SIZE = 128 * 1024
+
+    private val EMPTY_BYTES = ByteArray(0)
   }
 
   init {
@@ -133,12 +150,59 @@ open class MessageDigestFileHasher(
       file.isFile
     ) { "Cannot compute hash of a non-file or directory: ${file.absolutePath}" }
 
-    return file.inputStream().use { inputStream ->
+    val fileSize = if (maxBytes != null) file.length() else null
+    if (fileSize == 0L) {
+      return computeHash(
+        inputStream = ByteArrayInputStream(EMPTY_BYTES),
+        algorithm = algorithm,
+        maxBytes = maxBytes,
+        fileSize = 0L
+      )
+    }
+
+    return FileInputStream(file).use { inputStream ->
       computeHash(
         inputStream = inputStream,
         algorithm = algorithm,
         maxBytes = maxBytes,
-        fileSize = file.length()
+        fileSize = fileSize
+      )
+    }
+  }
+
+  override fun computeHash(
+    path: Path,
+    algorithm: String,
+    maxBytes: Long?,
+    knownFileSize: Long?
+  ): String {
+    // Short-circuit 0-byte files without opening a filesystem handle
+    if (knownFileSize == 0L) {
+      return computeHash(
+        inputStream = ByteArrayInputStream(EMPTY_BYTES),
+        algorithm = algorithm,
+        maxBytes = maxBytes,
+        fileSize = 0L
+      )
+    }
+
+    // Open the file directly without redundant exists()/isFile/length() syscalls
+    val inputStream: InputStream = try {
+      FileInputStream(path.toFile())
+    } catch (_: UnsupportedOperationException) {
+      Files.newInputStream(path)
+    }
+    return inputStream.use { stream ->
+      val effectiveSize = if (maxBytes != null) {
+        knownFileSize ?: Files.size(path)
+      } else {
+        null
+      }
+      computeHash(
+        inputStream = stream,
+        algorithm = algorithm,
+        maxBytes = maxBytes,
+        fileSize = effectiveSize
       )
     }
   }

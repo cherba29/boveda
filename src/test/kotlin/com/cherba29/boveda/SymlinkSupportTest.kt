@@ -570,4 +570,51 @@ class SymlinkSupportTest {
     assertEquals(1L, stats.totalFilesScanned)
     assertEquals(10L, stats.totalScannedBytes)
   }
+
+  @Test
+  fun `all scanners traverse symlinked root directory and bulkInsert persists cleanly`() {
+    val tempDir = Files.createTempDirectory("symlink-root-test")
+    val dbDir = Files.createTempDirectory("symlink-root-db")
+    try {
+      val realRoot = tempDir.resolve("real_root").apply { createDirectories() }
+      val sub = realRoot.resolve("sub").apply { createDirectories() }
+      sub.resolve("item.txt").writeText("inside symlinked root")
+      realRoot.resolve("empty.txt").writeBytes(ByteArray(0))
+
+      val rootLink = createSymlinkOrAssume(tempDir.resolve("linked_root"), realRoot)
+
+      val scanners = listOf(
+        FileTreeDirectoryScanner(),
+        ParallelDirectoryScanner(threadCount = 2),
+        WorkStealingDirectoryScanner(parallelism = 2)
+      )
+      for (scanner in scanners) {
+        val scanned = scanner.scan(rootLink).toList()
+        assertEquals(2, scanned.size, "Failed for ${scanner::class.simpleName}")
+        assertTrue(scanned.all { it.path.startsWith(rootLink.normalize()) })
+      }
+
+      val meta = WorkStealingMetadataScanner(parallelism = 2).scan(rootLink)
+      assertEquals(2L, meta.fileCount)
+      assertEquals("inside symlinked root".length.toLong(), meta.totalBytes)
+
+      val dbFile = dbDir.resolve("bulk_db")
+      val bulkDb = DatabaseFactory.connectFile(dbFile.toString(), bulkInsert = true)
+      val svc = BovedaService(database = bulkDb)
+      val snap = svc.scanAndRecord(rootLink)
+      DatabaseFactory.shutdown(bulkDb)
+
+      val reopened = DatabaseFactory.connectFile(dbFile.toString())
+      try {
+        val reopenedSvc = BovedaService(database = reopened)
+        val stats = reopenedSvc.computeDuplicateStatistics(snap.id.value, Duration.ZERO)
+        assertEquals(2L, stats.totalFilesScanned)
+      } finally {
+        DatabaseFactory.shutdown(reopened)
+      }
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
 }

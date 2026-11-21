@@ -2,9 +2,11 @@ package com.cherba29.boveda.scanner
 
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.util.concurrent.ArrayBlockingQueue
@@ -12,7 +14,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.invariantSeparatorsPathString
-import kotlin.io.path.walk
 
 /**
  * Multi-threaded producer-consumer directory scanner that decouples filesystem traversal
@@ -100,63 +101,85 @@ class ParallelDirectoryScanner(
         NamedThreadFactory("boveda-hash-worker")
       )
 
-      // Stage 1: Producer Thread (Directory Traversal)
+      // Stage 1: Producer Thread (Directory Traversal using Files.walkFileTree to reuse OS
+      // cached directory-entry attributes without extra per-file stat syscalls)
       producerExecutor.execute {
         try {
-          for (filePath in normalizedRoot.walk()) {
-            if (Thread.currentThread().isInterrupted) break
-            val normalizedFilePath = filePath.normalize()
-            val attrs = try {
-              Files.readAttributes(
-                normalizedFilePath,
-                BasicFileAttributes::class.java,
-                LinkOption.NOFOLLOW_LINKS
-              )
-            } catch (_: Exception) {
-              continue
-            }
-
-            val isSymlink = attrs.isSymbolicLink
-            if (isSymlink || attrs.isRegularFile) {
-              val relative = normalizedRoot.relativize(
-                normalizedFilePath
-              ).invariantSeparatorsPathString
-              val relativePath = if (relative.isNotEmpty()) {
-                relative
-              } else {
-                normalizedFilePath.invariantSeparatorsPathString
-              }
-              val size = attrs.size()
-              val lastModified = attrs.lastModifiedTime()
-              val symlinkTarget = if (isSymlink) {
-                SymlinkUtils.resolveTarget(normalizedFilePath)
-              } else {
-                null
-              }
-
-              val discovered = DiscoveredFile(
-                path = normalizedFilePath,
-                relativePath = relativePath,
-                size = size,
-                lastModifiedTime = lastModified,
-                isSymlink = isSymlink,
-                symlinkTarget = symlinkTarget
-              )
-
-              if (shouldSkip == null || !shouldSkip(discovered)) {
-                workQueue.put(
-                  WorkItem.FileItem(
-                    path = normalizedFilePath,
-                    relativePath = relativePath,
-                    size = size,
-                    lastModifiedTime = lastModified,
-                    isSymlink = isSymlink,
-                    symlinkTarget = symlinkTarget
-                  )
-                )
-              }
-            }
+          val walkRoot = if (Files.isSymbolicLink(normalizedRoot)) {
+            normalizedRoot.toRealPath()
+          } else {
+            normalizedRoot
           }
+          val remapPrefix = walkRoot != normalizedRoot
+
+          Files.walkFileTree(
+            walkRoot,
+            object : SimpleFileVisitor<Path>() {
+              override fun preVisitDirectory(
+                dir: Path,
+                attrs: BasicFileAttributes
+              ): FileVisitResult = if (Thread.currentThread().isInterrupted) {
+                FileVisitResult.TERMINATE
+              } else {
+                FileVisitResult.CONTINUE
+              }
+
+              override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (Thread.currentThread().isInterrupted) return FileVisitResult.TERMINATE
+                val isSymlink = attrs.isSymbolicLink
+                if (!isSymlink && !attrs.isRegularFile) {
+                  return FileVisitResult.CONTINUE
+                }
+
+                val normalizedFilePath = if (remapPrefix) {
+                  normalizedRoot.resolve(walkRoot.relativize(file)).normalize()
+                } else {
+                  file.normalize()
+                }
+                val relative = normalizedRoot.relativize(
+                  normalizedFilePath
+                ).invariantSeparatorsPathString
+                val relativePath = if (relative.isNotEmpty()) {
+                  relative
+                } else {
+                  normalizedFilePath.invariantSeparatorsPathString
+                }
+                val size = attrs.size()
+                val lastModified = attrs.lastModifiedTime()
+                val symlinkTarget = if (isSymlink) {
+                  SymlinkUtils.resolveTarget(normalizedFilePath)
+                } else {
+                  null
+                }
+
+                val discovered = DiscoveredFile(
+                  path = normalizedFilePath,
+                  relativePath = relativePath,
+                  size = size,
+                  lastModifiedTime = lastModified,
+                  isSymlink = isSymlink,
+                  symlinkTarget = symlinkTarget
+                )
+
+                if (shouldSkip == null || !shouldSkip(discovered)) {
+                  workQueue.put(
+                    WorkItem.FileItem(
+                      path = normalizedFilePath,
+                      relativePath = relativePath,
+                      size = size,
+                      lastModifiedTime = lastModified,
+                      isSymlink = isSymlink,
+                      symlinkTarget = symlinkTarget
+                    )
+                  )
+                }
+                return FileVisitResult.CONTINUE
+              }
+
+              override fun visitFileFailed(file: Path, exc: IOException?): FileVisitResult =
+                FileVisitResult.CONTINUE
+            }
+          )
 
           // Traversal finished: enqueue poison pills for each worker thread
           repeat(threadCount) {
@@ -185,7 +208,7 @@ class ParallelDirectoryScanner(
                 val hash = if (item.isSymlink) {
                   SymlinkUtils.computeSymlinkHash(item.symlinkTarget)
                 } else {
-                  hasher.computeHash(item.path.toFile(), algorithm, effectiveMaxBytes)
+                  hasher.computeHash(item.path, algorithm, effectiveMaxBytes, item.size)
                 }
                 val scannedFile = ScannedFile(
                   path = item.path,

@@ -3,7 +3,6 @@ package com.cherba29.boveda.scanner
 import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
@@ -12,7 +11,7 @@ import java.util.concurrent.ForkJoinWorkerThread
 import java.util.concurrent.RecursiveTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.LongAdder
+import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Predicate
 
 /**
@@ -115,8 +114,9 @@ class WorkStealingMetadataScanner(
 
   private class ScanMetadataTask(
     private val dir: Path,
-    private val filesCounter: LongAdder,
-    private val bytesCounter: LongAdder,
+    private val rootDir: Path,
+    private val filesCounter: AtomicLong,
+    private val bytesCounter: AtomicLong,
     private val onProgress: (filesScanned: Long, bytesScanned: Long) -> Unit
   ) : RecursiveTask<DirectoryMetadata>() {
     override fun compute(): DirectoryMetadata {
@@ -127,40 +127,45 @@ class WorkStealingMetadataScanner(
       var totalBytes = 0L
 
       try {
-        Files.newDirectoryStream(dir).use { stream ->
-          for (entry in stream) {
-            if (Thread.currentThread().isInterrupted) {
-              return DirectoryMetadata(fileCount, totalBytes)
-            }
-            val normalized = entry.normalize()
-            try {
-              val attrs = Files.readAttributes(
-                normalized,
-                BasicFileAttributes::class.java,
-                LinkOption.NOFOLLOW_LINKS
-              )
-              if (attrs.isSymbolicLink) {
-                val size = attrs.size()
-                fileCount++
-                totalBytes += size
-                filesCounter.increment()
-                bytesCounter.add(size)
-                onProgress(filesCounter.sum(), bytesCounter.sum())
-              } else if (attrs.isDirectory) {
-                subTasks.add(ScanMetadataTask(normalized, filesCounter, bytesCounter, onProgress))
-              } else if (attrs.isRegularFile) {
-                val size = attrs.size()
-                fileCount++
-                totalBytes += size
-                filesCounter.increment()
-                bytesCounter.add(size)
-                onProgress(filesCounter.sum(), bytesCounter.sum())
-              }
-            } catch (_: Exception) {
-              // Ignore inaccessible or unreadable entries
-            }
-          }
+        val walkDir = if (dir == rootDir && Files.isSymbolicLink(dir)) {
+          dir.toRealPath()
+        } else {
+          dir
         }
+        val remapPrefix = walkDir != dir
+
+        // Files.walkFileTree(depth = 1) reuses Windows FindNextFileW BasicFileAttributesHolder,
+        // eliminating per-entry GetFileAttributesExW syscalls.
+        Files.walkFileTree(
+          walkDir,
+          emptySet(),
+          1,
+          object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+              if (Thread.currentThread().isInterrupted) return FileVisitResult.TERMINATE
+              if (file == walkDir) return FileVisitResult.CONTINUE
+              if (attrs.isSymbolicLink || attrs.isRegularFile) {
+                val size = attrs.size()
+                fileCount++
+                totalBytes += size
+                onProgress(filesCounter.incrementAndGet(), bytesCounter.addAndGet(size))
+              } else if (attrs.isDirectory) {
+                val subDir = if (remapPrefix) {
+                  dir.resolve(file.fileName).normalize()
+                } else {
+                  file.normalize()
+                }
+                subTasks.add(
+                  ScanMetadataTask(subDir, rootDir, filesCounter, bytesCounter, onProgress)
+                )
+              }
+              return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFileFailed(file: Path, exc: IOException?): FileVisitResult =
+              FileVisitResult.CONTINUE
+          }
+        )
       } catch (_: Exception) {
         // Ignore unreadable directory
       }
@@ -201,10 +206,12 @@ class WorkStealingMetadataScanner(
       60L,
       TimeUnit.SECONDS
     )
-    val filesCounter = LongAdder()
-    val bytesCounter = LongAdder()
+    val filesCounter = AtomicLong(0L)
+    val bytesCounter = AtomicLong(0L)
     return try {
-      pool.invoke(ScanMetadataTask(normalizedRoot, filesCounter, bytesCounter, onProgress))
+      pool.invoke(
+        ScanMetadataTask(normalizedRoot, normalizedRoot, filesCounter, bytesCounter, onProgress)
+      )
     } finally {
       pool.shutdownNow()
     }

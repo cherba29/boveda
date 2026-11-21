@@ -2,12 +2,13 @@ package com.cherba29.boveda.scanner
 
 import com.cherba29.boveda.hash.FileHasher
 import com.cherba29.boveda.hash.MessageDigestFileHasher
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import kotlin.io.path.invariantSeparatorsPathString
-import kotlin.io.path.walk
 
 /**
  * Interface for scanning directories for regular files.
@@ -88,68 +89,105 @@ class FileTreeDirectoryScanner(
     val normalizedRoot = rootPath.normalize()
     val effectiveMaxBytes = maxBytes ?: this.maxBytes
 
-    return normalizedRoot.walk()
-      .mapNotNull { filePath ->
-        val normalizedFilePath = filePath.normalize()
-        val attrs = try {
-          Files.readAttributes(
-            normalizedFilePath,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS
+    return sequence {
+      val dirStack = ArrayDeque<Path>()
+      dirStack.addLast(normalizedRoot)
+
+      while (dirStack.isNotEmpty()) {
+        val currentDir = dirStack.removeLast()
+        val walkDir = if (currentDir == normalizedRoot && Files.isSymbolicLink(currentDir)) {
+          try {
+            currentDir.toRealPath()
+          } catch (_: Exception) {
+            continue
+          }
+        } else {
+          currentDir
+        }
+        val remapPrefix = walkDir != currentDir
+        val childDirs = mutableListOf<Path>()
+        val childFiles = mutableListOf<DiscoveredFile>()
+
+        try {
+          Files.walkFileTree(
+            walkDir,
+            emptySet(),
+            1,
+            object : SimpleFileVisitor<Path>() {
+              override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (file == walkDir) return FileVisitResult.CONTINUE
+                val normalizedFile = if (remapPrefix) {
+                  currentDir.resolve(file.fileName).normalize()
+                } else {
+                  file.normalize()
+                }
+                val isSymlink = attrs.isSymbolicLink
+                if (!isSymlink && attrs.isDirectory) {
+                  childDirs.add(normalizedFile)
+                  return FileVisitResult.CONTINUE
+                }
+                if (!isSymlink && !attrs.isRegularFile) {
+                  return FileVisitResult.CONTINUE
+                }
+
+                val relative = normalizedRoot.relativize(
+                  normalizedFile
+                ).invariantSeparatorsPathString
+                val relativePath = if (relative.isNotEmpty()) {
+                  relative
+                } else {
+                  normalizedFile.invariantSeparatorsPathString
+                }
+                val symlinkTarget = if (isSymlink) {
+                  SymlinkUtils.resolveTarget(normalizedFile)
+                } else {
+                  null
+                }
+                childFiles.add(
+                  DiscoveredFile(
+                    path = normalizedFile,
+                    relativePath = relativePath,
+                    size = attrs.size(),
+                    lastModifiedTime = attrs.lastModifiedTime(),
+                    isSymlink = isSymlink,
+                    symlinkTarget = symlinkTarget
+                  )
+                )
+                return FileVisitResult.CONTINUE
+              }
+
+              override fun visitFileFailed(file: Path, exc: IOException?): FileVisitResult =
+                FileVisitResult.CONTINUE
+            }
           )
         } catch (_: Exception) {
-          return@mapNotNull null
+          continue
         }
 
-        val isSymlink = attrs.isSymbolicLink
-        if (!isSymlink && !attrs.isRegularFile) {
-          return@mapNotNull null
+        for (i in childDirs.lastIndex downTo 0) {
+          dirStack.addLast(childDirs[i])
         }
 
-        val relative = normalizedRoot.relativize(
-          normalizedFilePath
-        ).invariantSeparatorsPathString
-        val relativePath = if (relative.isNotEmpty()) {
-          relative
-        } else {
-          normalizedFilePath.invariantSeparatorsPathString
+        for (discovered in childFiles) {
+          if (shouldSkip != null && shouldSkip(discovered)) continue
+          val hash = if (discovered.isSymlink) {
+            SymlinkUtils.computeSymlinkHash(discovered.symlinkTarget)
+          } else {
+            hasher.computeHash(discovered.path, algorithm, effectiveMaxBytes, discovered.size)
+          }
+          yield(
+            ScannedFile(
+              path = discovered.path,
+              relativePath = discovered.relativePath,
+              size = discovered.size,
+              hash = hash,
+              lastModifiedTime = discovered.lastModifiedTime,
+              isSymlink = discovered.isSymlink,
+              symlinkTarget = discovered.symlinkTarget
+            )
+          )
         }
-        val size = attrs.size()
-        val lastModified = attrs.lastModifiedTime()
-        val symlinkTarget = if (isSymlink) {
-          SymlinkUtils.resolveTarget(normalizedFilePath)
-        } else {
-          null
-        }
-
-        val discovered = DiscoveredFile(
-          path = normalizedFilePath,
-          relativePath = relativePath,
-          size = size,
-          lastModifiedTime = lastModified,
-          isSymlink = isSymlink,
-          symlinkTarget = symlinkTarget
-        )
-
-        if (shouldSkip != null && shouldSkip(discovered)) {
-          return@mapNotNull null
-        }
-
-        val hash = if (isSymlink) {
-          SymlinkUtils.computeSymlinkHash(symlinkTarget)
-        } else {
-          hasher.computeHash(normalizedFilePath.toFile(), algorithm, effectiveMaxBytes)
-        }
-
-        ScannedFile(
-          path = normalizedFilePath,
-          relativePath = relativePath,
-          size = size,
-          hash = hash,
-          lastModifiedTime = lastModified,
-          isSymlink = isSymlink,
-          symlinkTarget = symlinkTarget
-        )
       }
+    }
   }
 }

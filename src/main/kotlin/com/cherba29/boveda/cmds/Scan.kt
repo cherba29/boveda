@@ -186,7 +186,7 @@ class ScanCommand(
     }
 
     val repoDb = when {
-      rawDbPath != null -> DatabaseFactory.connectFile(rawDbPath.toString())
+      rawDbPath != null -> DatabaseFactory.connectFile(rawDbPath.toString(), bulkInsert = true)
       serviceFactory != null -> DatabaseFactory.connectInMemory("test")
       else -> throw UsageError("Target database must be specified as an argument or via --db")
     }

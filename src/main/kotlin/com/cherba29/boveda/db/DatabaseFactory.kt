@@ -30,12 +30,22 @@ object DatabaseFactory {
 
   /**
    * Connects to a persistent file-based H2 database at [path] and initializes tables.
+   *
+   * When [bulkInsert] is true (e.g. during `scan`), increases H2's `WRITE_DELAY` to 2000ms to
+   * amortize MVStore disk flushes and reduce antivirus rescan overhead on Windows; callers should
+   * invoke [shutdown] when finished to flush all pages cleanly.
    */
-  fun connectFile(path: String, cacheSizeKb: Int = DEFAULT_H2_CACHE_SIZE_KB): Database {
+  fun connectFile(
+    path: String,
+    cacheSizeKb: Int = DEFAULT_H2_CACHE_SIZE_KB,
+    bulkInsert: Boolean = false
+  ): Database {
     require(cacheSizeKb >= 0) { "cacheSizeKb must be non-negative, but was $cacheSizeKb" }
     val normalizedPath = if (path.endsWith(".mv.db")) path.removeSuffix(".mv.db") else path
+    val writeDelaySuffix = if (bulkInsert) ";WRITE_DELAY=2000" else ""
     val database = Database.connect(
-      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1;CACHE_SIZE=$cacheSizeKb",
+      url = "jdbc:h2:file:$normalizedPath;DB_CLOSE_DELAY=-1;CACHE_SIZE=$cacheSizeKb" +
+        writeDelaySuffix,
       driver = "org.h2.Driver"
     )
     initSchema(database)

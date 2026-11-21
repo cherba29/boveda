@@ -285,4 +285,44 @@ class FileHasherTest {
       executor.shutdown()
     }
   }
+
+  @Test
+  fun `computeHash with knownFileSize matches File overload and short-circuits zero-byte files`() {
+    val tempFile = Files.createTempFile("hasher-known-size", ".bin")
+    val emptyFile = Files.createTempFile("hasher-empty-known", ".bin")
+    try {
+      val content = "fast-path-known-size-payload-".repeat(200).toByteArray()
+      Files.write(tempFile, content)
+
+      val algorithms = listOf("XXH3", "XXH3_128", "CRC32", "MD5", "SHA-256")
+      for (algo in algorithms) {
+        assertEquals(
+          hasher.computeHash(tempFile.toFile(), algo, maxBytes = null),
+          hasher.computeHash(tempFile, algo, maxBytes = null, knownFileSize = content.size.toLong())
+        )
+        assertEquals(
+          hasher.computeHash(tempFile.toFile(), algo, maxBytes = 1024L),
+          hasher.computeHash(
+            tempFile,
+            algo,
+            maxBytes = 1024L,
+            knownFileSize = content.size.toLong()
+          )
+        )
+        // Zero-byte short-circuit matches empty file identically without opening disk handle
+        val nonExistent = tempFile.parent.resolve("never-opened-zero-byte.bin")
+        assertEquals(
+          hasher.computeHash(emptyFile.toFile(), algo, maxBytes = null),
+          hasher.computeHash(nonExistent, algo, maxBytes = null, knownFileSize = 0L)
+        )
+        assertEquals(
+          hasher.computeHash(emptyFile.toFile(), algo, maxBytes = 1024L),
+          hasher.computeHash(nonExistent, algo, maxBytes = 1024L, knownFileSize = 0L)
+        )
+      }
+    } finally {
+      Files.deleteIfExists(tempFile)
+      Files.deleteIfExists(emptyFile)
+    }
+  }
 }
