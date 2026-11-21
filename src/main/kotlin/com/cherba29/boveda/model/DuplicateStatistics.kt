@@ -25,15 +25,15 @@ data class DuplicateGroup(
 }
 
 /**
- * Represents a 10% percentile decile bucket of duplicate files partitioned by file size.
+ * Represents a 10% percentile decile bucket of all scanned files partitioned by file size.
  *
  * @property bucketIndex 1-based index (1 to 10).
  * @property percentileRange String representation of the percentile span (e.g. "0% - 10%").
  * @property minSize The minimum file size in bytes in this bucket.
  * @property maxSize The maximum file size in bytes in this bucket.
- * @property fileCount The number of duplicate file instances in this bucket.
- * @property sizeBytes The total unique content size in bytes in this bucket.
- * @property totalDuplicateBytes The total duplicated storage occupied by files in this bucket.
+ * @property fileCount The total number of file instances in this bucket.
+ * @property sizeBytes The total storage size in bytes used by all files in this bucket.
+ * @property totalDuplicateBytes The total duplicated storage occupied by duplicate files in this bucket.
  * @property wastedBytes The total redundant/wasted storage in this bucket ((copies - 1) * size).
  * @property percentageOfTotalWasted The percentage of total wasted storage accounted for by this bucket.
  */

@@ -1070,12 +1070,12 @@ class BovedaService(
         0.0
       }
 
-      if (duplicateGroupsCount == 0L) {
+      if (totalFilesScanned == 0L) {
         return@transaction DuplicateStatistics(
-          totalFilesScanned = totalFilesScanned,
-          totalScannedBytes = totalScannedBytes,
-          distinctFiles = distinctFiles,
-          distinctBytes = distinctBytes,
+          totalFilesScanned = 0L,
+          totalScannedBytes = 0L,
+          distinctFiles = 0L,
+          distinctBytes = 0L,
           duplicateFileCount = 0L,
           duplicateGroupsCount = 0L,
           wastedBytes = 0L,
@@ -1088,65 +1088,75 @@ class BovedaService(
       }
 
       // 2. Fetch top 10 largest duplicate groups in SQL, then load paths only for those 10 file IDs
-      data class TopGroupRow(val fileId: Int, val hash: String, val size: Long, val copyCount: Int)
-      val top10Sql = """
-        SELECT g.file_id, fl.hash, fl."size" AS sz, g.cnt
-        FROM (
-          SELECT file_id, COUNT(*) AS cnt
-          FROM file_instances
-          WHERE snapshot_id = ?
-          GROUP BY file_id
-          HAVING COUNT(*) > 1
-        ) g
-        JOIN files fl ON g.file_id = fl.id
-        ORDER BY
-          (g.cnt * fl."size") DESC,
-          fl."size" DESC,
-          ((g.cnt - 1) * fl."size") DESC
-        LIMIT 10
-      """.trimIndent()
+      val largest10 = if (duplicateGroupsCount == 0L) {
+        emptyList()
+      } else {
+        data class TopGroupRow(
+          val fileId: Int,
+          val hash: String,
+          val size: Long,
+          val copyCount: Int
+        )
+        val top10Sql = """
+          SELECT g.file_id, fl.hash, fl."size" AS sz, g.cnt
+          FROM (
+            SELECT file_id, COUNT(*) AS cnt
+            FROM file_instances
+            WHERE snapshot_id = ?
+            GROUP BY file_id
+            HAVING COUNT(*) > 1
+          ) g
+          JOIN files fl ON g.file_id = fl.id
+          ORDER BY
+            (g.cnt * fl."size") DESC,
+            fl."size" DESC,
+            ((g.cnt - 1) * fl."size") DESC
+          LIMIT 10
+        """.trimIndent()
 
-      val topRows = mutableListOf<TopGroupRow>()
-      conn.prepareStatement(top10Sql).use { stmt ->
-        stmt.setInt(1, snapshotId)
-        stmt.executeQuery().use { rs ->
-          while (rs.next()) {
-            topRows.add(
-              TopGroupRow(
-                fileId = rs.getInt("file_id"),
-                hash = rs.getString("hash"),
-                size = rs.getLong("sz"),
-                copyCount = rs.getInt("cnt")
+        val topRows = mutableListOf<TopGroupRow>()
+        conn.prepareStatement(top10Sql).use { stmt ->
+          stmt.setInt(1, snapshotId)
+          stmt.executeQuery().use { rs ->
+            while (rs.next()) {
+              topRows.add(
+                TopGroupRow(
+                  fileId = rs.getInt("file_id"),
+                  hash = rs.getString("hash"),
+                  size = rs.getLong("sz"),
+                  copyCount = rs.getInt("cnt")
+                )
               )
-            )
+            }
           }
+        }
+
+        val topFileIds = topRows.map { EntityID(it.fileId, RepoFiles) }
+        val pathsByFileId = mutableMapOf<Int, MutableList<String>>()
+        if (topFileIds.isNotEmpty()) {
+          RepoFileInstances.select(RepoFileInstances.file, RepoFileInstances.path)
+            .where {
+              (RepoFileInstances.snapshot eq snapshotId) and
+                (RepoFileInstances.file inList topFileIds)
+            }
+            .forEach { row ->
+              pathsByFileId.getOrPut(row[RepoFileInstances.file].value) { mutableListOf() }
+                .add(row[RepoFileInstances.path])
+            }
+        }
+
+        topRows.map { row ->
+          DuplicateGroup(
+            hash = row.hash,
+            size = row.size,
+            copyCount = row.copyCount,
+            paths = pathsByFileId[row.fileId] ?: emptyList()
+          )
         }
       }
 
-      val topFileIds = topRows.map { EntityID(it.fileId, RepoFiles) }
-      val pathsByFileId = mutableMapOf<Int, MutableList<String>>()
-      if (topFileIds.isNotEmpty()) {
-        RepoFileInstances.select(RepoFileInstances.file, RepoFileInstances.path)
-          .where {
-            (RepoFileInstances.snapshot eq snapshotId) and
-              (RepoFileInstances.file inList topFileIds)
-          }
-          .forEach { row ->
-            pathsByFileId.getOrPut(row[RepoFileInstances.file].value) { mutableListOf() }
-              .add(row[RepoFileInstances.path])
-          }
-      }
-
-      val largest10 = topRows.map { row ->
-        DuplicateGroup(
-          hash = row.hash,
-          size = row.size,
-          copyCount = row.copyCount,
-          paths = pathsByFileId[row.fileId] ?: emptyList()
-        )
-      }
-
-      // 3. Stream (size, copy_count) ordered by size into 10 scalar decile accumulators (O(1) heap)
+      // 3. Stream (size, copy_count) across ALL scanned files ordered by size into 10 scalar
+      //    decile accumulators (O(1) heap) so each decile tracks total files and total size used.
       val percentileSql = """
         SELECT fl."size" AS sz, g.cnt
         FROM (
@@ -1154,7 +1164,6 @@ class BovedaService(
           FROM file_instances
           WHERE snapshot_id = ?
           GROUP BY file_id
-          HAVING COUNT(*) > 1
         ) g
         JOIN files fl ON g.file_id = fl.id
         ORDER BY fl."size" ASC
@@ -1168,22 +1177,37 @@ class BovedaService(
       val duplicatedBytesArr = LongArray(10)
       val wastedBytesArr = LongArray(10)
 
-      var idx = 0L
+      var globalIdx = 0L
       conn.prepareStatement(percentileSql).use { stmt ->
         stmt.setInt(1, snapshotId)
         stmt.executeQuery().use { rs ->
           while (rs.next()) {
             val sz = rs.getLong("sz")
             val cnt = rs.getLong("cnt")
-            val bucketIdx = minOf(9, ((idx * 10L) / duplicateGroupsCount).toInt())
-            hasItems[bucketIdx] = true
-            if (sz < minSizes[bucketIdx]) minSizes[bucketIdx] = sz
-            if (sz > maxSizes[bucketIdx]) maxSizes[bucketIdx] = sz
-            fileCounts[bucketIdx] += cnt.toInt()
-            sizeBytesArr[bucketIdx] += sz
-            duplicatedBytesArr[bucketIdx] += cnt * sz
-            wastedBytesArr[bucketIdx] += (cnt - 1L) * sz
-            idx++
+            var remaining = cnt
+            var isFirstCopy = true
+            while (remaining > 0L) {
+              val bucketIdx = minOf(9, ((globalIdx * 10L) / totalFilesScanned).toInt())
+              val bucketEnd = if (bucketIdx == 9) {
+                totalFilesScanned
+              } else {
+                ((bucketIdx + 1L) * totalFilesScanned + 9L) / 10L
+              }
+              val take = minOf(remaining, (bucketEnd - globalIdx).coerceAtLeast(1L))
+              hasItems[bucketIdx] = true
+              if (sz < minSizes[bucketIdx]) minSizes[bucketIdx] = sz
+              if (sz > maxSizes[bucketIdx]) maxSizes[bucketIdx] = sz
+              fileCounts[bucketIdx] += take.toInt()
+              sizeBytesArr[bucketIdx] += take * sz
+              if (cnt > 1L) {
+                duplicatedBytesArr[bucketIdx] += take * sz
+                val redundantInSlice = if (isFirstCopy) take - 1L else take
+                wastedBytesArr[bucketIdx] += redundantInSlice * sz
+              }
+              isFirstCopy = false
+              globalIdx += take
+              remaining -= take
+            }
           }
         }
       }

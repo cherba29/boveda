@@ -170,8 +170,11 @@ class DuplicateStatisticsTest {
     val totalBucketDuplicated = stats.percentileBuckets.sumOf { it.totalDuplicateBytes }
     assertEquals(stats.totalDuplicateBytes, totalBucketDuplicated)
 
+    val totalBucketFiles = stats.percentileBuckets.sumOf { it.fileCount.toLong() }
+    assertEquals(stats.totalFilesScanned, totalBucketFiles)
+
     val totalBucketSize = stats.percentileBuckets.sumOf { it.sizeBytes }
-    assertEquals(totalBucketDuplicated - totalBucketWasted, totalBucketSize)
+    assertEquals(stats.totalScannedBytes, totalBucketSize)
     assertTrue(totalBucketSize > 0)
 
     // Percentage sums to 100%
@@ -191,6 +194,7 @@ class DuplicateStatisticsTest {
     val stats = service.computeDuplicateStatistics(snapshot.id.value, 100.milliseconds)
 
     assertEquals(2L, stats.totalFilesScanned)
+    assertEquals(300L, stats.totalScannedBytes)
     assertEquals(0L, stats.duplicateFileCount)
     assertEquals(0L, stats.duplicateGroupsCount)
     assertEquals(0L, stats.wastedBytes)
@@ -198,10 +202,61 @@ class DuplicateStatisticsTest {
     assertTrue(stats.largestDuplicates.isEmpty())
 
     assertEquals(10, stats.percentileBuckets.size)
+    assertEquals(2L, stats.percentileBuckets.sumOf { it.fileCount.toLong() })
+    assertEquals(300L, stats.percentileBuckets.sumOf { it.sizeBytes })
     stats.percentileBuckets.forEach { bucket ->
       assertEquals(0L, bucket.wastedBytes)
-      assertEquals(0, bucket.fileCount)
+      assertEquals(0L, bucket.totalDuplicateBytes)
     }
+  }
+
+  @Test
+  fun `percentile deciles include both unique and duplicate files with total size per decile`() {
+    val (service, _) = createService()
+    val snapshot = service.createSnapshot(Paths.get("/mixed"))
+
+    // 10 total files:
+    // 6 unique files of 100, 200, 300, 400, 500, 600 bytes (sum = 2,100 bytes)
+    for (i in 1..6) {
+      val sz = i * 100L
+      service.recordFile(
+        snapshot,
+        ScannedFile(Paths.get("u$i.bin"), "u$i.bin", sz, "uniq_$i")
+      )
+    }
+    // 2 duplicate copies of 1,000 bytes (total size = 2,000, wasted = 1,000)
+    service.recordFile(snapshot, ScannedFile(Paths.get("d1a.bin"), "d1a.bin", 1000L, "dup_1k"))
+    service.recordFile(snapshot, ScannedFile(Paths.get("d1b.bin"), "d1b.bin", 1000L, "dup_1k"))
+    // 2 duplicate copies of 5,000 bytes (total size = 10,000, wasted = 5,000)
+    service.recordFile(snapshot, ScannedFile(Paths.get("d5a.bin"), "d5a.bin", 5000L, "dup_5k"))
+    service.recordFile(snapshot, ScannedFile(Paths.get("d5b.bin"), "d5b.bin", 5000L, "dup_5k"))
+
+    val stats = service.computeDuplicateStatistics(snapshot.id.value, 50.milliseconds)
+
+    assertEquals(10L, stats.totalFilesScanned)
+    assertEquals(14_100L, stats.totalScannedBytes)
+    assertEquals(10L, stats.percentileBuckets.sumOf { it.fileCount.toLong() })
+    assertEquals(14_100L, stats.percentileBuckets.sumOf { it.sizeBytes })
+    assertEquals(12_000L, stats.percentileBuckets.sumOf { it.totalDuplicateBytes })
+    assertEquals(6_000L, stats.percentileBuckets.sumOf { it.wastedBytes })
+
+    // Each of the 10 deciles gets 1 file; last two deciles each hold one 5,000-byte copy
+    assertEquals(1, stats.percentileBuckets[0].fileCount)
+    assertEquals(100L, stats.percentileBuckets[0].sizeBytes)
+    assertEquals(0L, stats.percentileBuckets[0].wastedBytes)
+    assertEquals(1, stats.percentileBuckets[8].fileCount)
+    assertEquals(5000L, stats.percentileBuckets[8].sizeBytes)
+    assertEquals(1, stats.percentileBuckets[9].fileCount)
+    assertEquals(5000L, stats.percentileBuckets[9].sizeBytes)
+
+    // Footer row in rendered table must show total files (10) and total size (13.77 KB)
+    val table = service.formatPercentileTable(stats)
+    val totalLine = table.lines().first { it.contains("Total") }
+    assertTrue(totalLine.contains("10"), "Expected total file count 10 in footer: $totalLine")
+    assertTrue(
+      totalLine.contains(formatBytesShort(14_100L)),
+      "Expected total storage ${formatBytesShort(14_100L)} in footer: $totalLine"
+    )
   }
 
   @Test
