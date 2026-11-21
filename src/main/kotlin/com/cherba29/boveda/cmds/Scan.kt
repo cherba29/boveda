@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.hash.parseByteSize
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.formatDisplayPath
 import com.cherba29.boveda.model.formatDuration
 import com.cherba29.boveda.progress.EstimatingProgressIndicator
 import com.cherba29.boveda.progress.MordantEstimatingProgressIndicator
@@ -322,7 +323,7 @@ class ScanCommand(
       ) { file ->
         if (!quiet) {
           if (file.isSymlink) {
-            val targetInfo = file.symlinkTarget ?: ""
+            val targetInfo = formatDisplayPath(file.symlinkTarget ?: "")
             echo("${file.lastModifiedTime} ${file.size} ${file.path} [symlink -> $targetInfo]")
           } else {
             echo("${file.lastModifiedTime} ${file.size} ${file.path} ${file.hash}")

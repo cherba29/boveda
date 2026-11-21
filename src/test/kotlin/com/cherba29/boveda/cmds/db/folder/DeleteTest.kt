@@ -5,17 +5,25 @@ import com.cherba29.boveda.cmds.BovedaCommand
 import com.cherba29.boveda.cmds.DbCommand
 import com.cherba29.boveda.cmds.ScanCommand
 import com.cherba29.boveda.cmds.db.FolderCommand
+import com.cherba29.boveda.cmds.db.file.InteractiveDuplicateSelector
 import com.cherba29.boveda.db.DatabaseFactory
 import com.cherba29.boveda.db.RepoFile
 import com.cherba29.boveda.db.RepoFileInstance
 import com.cherba29.boveda.db.RepoFolder
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.model.DuplicateFolderGroup
+import com.cherba29.boveda.model.DuplicateGroup
+import com.cherba29.boveda.model.SymlinkEntry
+import com.cherba29.boveda.model.formatDisplayPath
+import com.cherba29.boveda.progress.StatusSpinner
+import com.cherba29.boveda.scanner.ScannedFile
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.testing.test
 import com.github.ajalt.mordant.terminal.Terminal
 import com.github.ajalt.mordant.terminal.TerminalRecorder
 import java.nio.file.Files
+import java.nio.file.Path
+import java.sql.Connection
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.writeText
@@ -24,8 +32,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
 class DeleteTest {
@@ -330,5 +340,231 @@ class DeleteTest {
     rec4.inputLines.add("q")
     val sel4 = InteractiveDuplicateFolderSelector(Terminal(terminalInterface = rec4))
     assertNull(sel4.selectDuplicateFolders(group))
+  }
+
+  @Test
+  fun `formatDisplayPath and selectors render native OS separators while returning DB paths`() {
+    assertEquals(
+      "E:\\repo\\bookArt\\EPS",
+      formatDisplayPath("E:/repo/bookArt/EPS", '\\')
+    )
+    assertEquals(
+      "E:/repo/bookArt/EPS",
+      formatDisplayPath("E:/repo/bookArt/EPS", '/')
+    )
+    assertEquals(
+      "\\\\server\\share\\dir",
+      formatDisplayPath("//server/share/dir", '\\')
+    )
+
+    val folderGroup = DuplicateFolderGroup(
+      signature = "win-sig",
+      fileCount = 2,
+      folderBytes = 100L,
+      paths = listOf("E:/repo/a/EPS", "E:/repo/b/EPS"),
+      symlinkPaths = listOf(SymlinkEntry("E:/repo/link_eps", "E:/repo/a/EPS"))
+    )
+    val folderRec = TerminalRecorder(inputInteractive = false, outputInteractive = false).apply {
+      inputLines.add("1, 3")
+    }
+    val folderSel = InteractiveDuplicateFolderSelector(
+      terminal = Terminal(terminalInterface = folderRec),
+      pathSeparator = '\\'
+    )
+    val chosenFolders = folderSel.selectDuplicateFolders(folderGroup)
+    assertEquals(listOf("E:/repo/a/EPS", "E:/repo/link_eps"), chosenFolders)
+    assertTrue(folderRec.output().contains("E:\\repo\\a\\EPS"))
+    assertTrue(folderRec.output().contains("E:\\repo\\b\\EPS"))
+    assertTrue(folderRec.output().contains("E:\\repo\\link_eps [symlink -> E:\\repo\\a\\EPS]"))
+
+    val fileGroup = DuplicateGroup(
+      hash = "h".repeat(64),
+      size = 50L,
+      copyCount = 2,
+      paths = listOf("E:/repo/a/f.eps", "E:/repo/b/f.eps"),
+      symlinkPaths = listOf(SymlinkEntry("E:/repo/link.eps", "E:/repo/a/f.eps"))
+    )
+    val fileRec = TerminalRecorder(inputInteractive = false, outputInteractive = false).apply {
+      inputLines.add("2")
+    }
+    val fileSel = InteractiveDuplicateSelector(
+      terminal = Terminal(terminalInterface = fileRec),
+      pathSeparator = '\\'
+    )
+    val chosenFiles = fileSel.selectDuplicates(fileGroup)
+    assertEquals(listOf("E:/repo/b/f.eps"), chosenFiles)
+    assertTrue(fileRec.output().contains("E:\\repo\\a\\f.eps"))
+    assertTrue(fileRec.output().contains("E:\\repo\\link.eps [symlink -> E:\\repo\\a\\f.eps]"))
+  }
+
+  @Test
+  fun `deleteFolder removes read-only files and read-only directories from disk`() {
+    val tempDir = Files.createTempDirectory("folder-readonly-del-dir")
+    val dbDir = Files.createTempDirectory("folder-readonly-del-db")
+    try {
+      val dir1 = tempDir.resolve("dir1").apply { createDirectories() }
+      val dir2 = tempDir.resolve("dir2").apply { createDirectories() }
+      val f1 = dir1.resolve("art.eps").apply { writeText("eps vector data") }
+      val f2 = dir2.resolve("art.eps").apply { writeText("eps vector data") }
+
+      val dbFile = dbDir.resolve("readonly_db")
+      assertEquals(
+        0,
+        ScanCommand().test(listOf("--quiet", tempDir.toString(), dbFile.toString())).statusCode
+      )
+
+      // Mark file and directory read-only before deletion (simulating CD-ROM / Windows archive)
+      f2.toFile().setWritable(false)
+      dir2.toFile().setWritable(false)
+
+      val db = DatabaseFactory.connectFile(dbFile.toString())
+      try {
+        val service = BovedaService(database = db)
+        val snap = service.getLatestSnapshot()!!
+        val res = service.deleteFolder(snap.id.value, dir2)
+        assertEquals(1, res.filesDeletedFromDisk)
+        assertTrue(res.folderDeletedFromDisk)
+        assertNull(res.folderDeletionError)
+        assertFalse(dir2.exists())
+        assertTrue(dir1.exists())
+        assertTrue(f1.exists())
+      } finally {
+        DatabaseFactory.shutdown(db)
+      }
+    } finally {
+      tempDir.toFile().walkBottomUp().forEach { it.setWritable(true) }
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `deleteFolder reports diagnostic reason when untracked leftover prevents directory removal`() {
+    val tempDir = Files.createTempDirectory("folder-leftover-del-dir")
+    val dbDir = Files.createTempDirectory("folder-leftover-del-db")
+    try {
+      val dir1 = tempDir.resolve("dir1").apply { createDirectories() }
+      val dir2 = tempDir.resolve("dir2").apply { createDirectories() }
+      dir1.resolve("doc.txt").writeText("duplicate content")
+      dir2.resolve("doc.txt").writeText("duplicate content")
+
+      val dbFile = dbDir.resolve("leftover_db")
+      assertEquals(
+        0,
+        ScanCommand().test(listOf("--quiet", tempDir.toString(), dbFile.toString())).statusCode
+      )
+
+      // Add an untracked file on disk after scanning
+      val leftover = dir2.resolve("untracked.tmp").apply { writeText("created later") }
+
+      val res = DbCommand().test(listOf(dbFile.toString(), "folder", "delete", dir2.toString()))
+      assertEquals(0, res.statusCode)
+      assertTrue(res.output.contains("directory not removed from disk"))
+      assertTrue(res.output.contains("directory not empty"))
+      assertTrue(res.output.contains("untracked.tmp"))
+      assertTrue(leftover.exists())
+      assertTrue(dir2.exists())
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `findParentFolderPaths accurately detects ancestors on Unix and Windows paths`() {
+    val db = DatabaseFactory.connectInMemory("parent_paths_test_${System.nanoTime()}")
+    val service = BovedaService(database = db)
+    val snap = service.createSnapshot(Path.of("E:/repo"))
+    val h = "c".repeat(64)
+
+    service.recordBatch(
+      snap,
+      listOf(
+        ScannedFile(Path.of("E:/repo/dir/a.txt"), "dir/a.txt", 10L, h),
+        ScannedFile(Path.of("E:/repo/dir/sub/b.txt"), "dir/sub/b.txt", 10L, h),
+        ScannedFile(Path.of("E:/repo/dir-copy/a.txt"), "dir-copy/a.txt", 10L, h),
+        ScannedFile(Path.of("E:/rootfile.txt"), "rootfile.txt", 10L, h)
+      )
+    )
+
+    val parents = transaction(db) {
+      val conn = TransactionManager.current().connection.connection as Connection
+      service.findParentFolderPaths(
+        conn,
+        snap.id.value,
+        setOf("E:/", "E:/repo", "E:/repo/dir", "E:/repo/dir/sub", "E:/repo/dir-copy")
+      )
+    }
+    assertTrue("E:/" in parents)
+    assertTrue("E:/repo" in parents)
+    assertTrue("E:/repo/dir" in parents)
+    assertFalse("E:/repo/dir/sub" in parents)
+    assertFalse("E:/repo/dir-copy" in parents)
+  }
+
+  @Test
+  fun `interactive folder delete exposes matching parent folders after child deletion`() {
+    val tempDir = Files.createTempDirectory("folder-nested-expose-dir")
+    val dbDir = Files.createTempDirectory("folder-nested-expose-db")
+    try {
+      val p1 = tempDir.resolve("p1").apply { createDirectories() }
+      val p2 = tempDir.resolve("p2").apply { createDirectories() }
+      val c1 = p1.resolve("child").apply { createDirectories() }
+      val c2 = p2.resolve("child").apply { createDirectories() }
+      p1.resolve("parent.txt").writeText("identical parent file")
+      p2.resolve("parent.txt").writeText("identical parent file")
+      c1.resolve("child.txt").writeText("identical child file")
+      c2.resolve("child.txt").writeText("identical child file")
+
+      val dbFile = dbDir.resolve("nested_expose_db")
+      assertEquals(
+        0,
+        ScanCommand().test(listOf("--quiet", tempDir.toString(), dbFile.toString())).statusCode
+      )
+
+      val seenGroups = mutableListOf<List<String>>()
+      val cmd = DeleteCommand(
+        folderSelector = { group ->
+          seenGroups.add(group.paths)
+          if (seenGroups.size == 1) {
+            // Delete both identical child folders, exposing p1 and p2 as leaf duplicates
+            group.paths
+          } else {
+            // Delete p2
+            listOf(group.paths.last())
+          }
+        }
+      )
+      val res = cmd.test(listOf(dbFile.toString()))
+      assertEquals(0, res.statusCode)
+      assertEquals(2, seenGroups.size)
+      assertTrue(seenGroups[0].all { it.endsWith("/child") })
+      assertTrue(
+        seenGroups[1].any { it.endsWith("/p1") } && seenGroups[1].any { it.endsWith("/p2") }
+      )
+      assertFalse(c1.exists())
+      assertFalse(c2.exists())
+      assertFalse(p2.exists())
+      assertTrue(p1.exists())
+    } finally {
+      tempDir.toFile().deleteRecursively()
+      dbDir.toFile().deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `StatusSpinner updates and clears cleanly in interactive and non-interactive modes`() {
+    val nonInteractive = TerminalRecorder(outputInteractive = false)
+    StatusSpinner(Terminal(terminalInterface = nonInteractive), "Working...").use { spinner ->
+      spinner.update("Still working...")
+    }
+    assertEquals("", nonInteractive.output())
+
+    val interactive = TerminalRecorder(outputInteractive = true)
+    val spinner = StatusSpinner(Terminal(terminalInterface = interactive), "Searching...")
+    spinner.update("Deleting files...")
+    Thread.sleep(50)
+    spinner.close()
+    assertNotNull(interactive.output())
   }
 }

@@ -1,5 +1,14 @@
 package com.cherba29.boveda.model
 
+import java.io.File
+
+/**
+ * Formats a database-normalized path (stored using `/` separators) for display on screen using
+ * the native OS path separator (`\` on Windows, `/` on Linux/macOS).
+ */
+fun formatDisplayPath(path: String, separator: Char = File.separatorChar): String =
+  if (separator == '/') path else path.replace('/', separator)
+
 /**
  * Represents a symbolic link associated with a file or folder in duplicate reports and selectors.
  *

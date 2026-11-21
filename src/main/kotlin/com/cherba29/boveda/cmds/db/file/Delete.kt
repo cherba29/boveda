@@ -7,6 +7,8 @@ import com.cherba29.boveda.cmds.resolveSnapshot
 import com.cherba29.boveda.cmds.resolveSnapshotId
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.model.DuplicateGroup
+import com.cherba29.boveda.model.formatDisplayPath
+import com.cherba29.boveda.progress.StatusSpinner
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -136,20 +138,21 @@ class DeleteCommand(
         )
       }
 
+      val displayPath = formatDisplayPath(result.path)
       when {
         result.isSymlink && result.deletedFromDisk -> {
-          echo("Deleted symlink from disk and database (target preserved): ${result.path}")
+          echo("Deleted symlink from disk and database (target preserved): $displayPath")
         }
         result.isSymlink -> {
           echo(
-            "Deleted symlink from database (not found on disk; target preserved): ${result.path}"
+            "Deleted symlink from database (not found on disk; target preserved): $displayPath"
           )
         }
         result.deletedFromDisk -> {
-          echo("Deleted file from disk and database: ${result.path}")
+          echo("Deleted file from disk and database: $displayPath")
         }
         else -> {
-          echo("Deleted file from database (not found on disk): ${result.path}")
+          echo("Deleted file from database (not found on disk): $displayPath")
         }
       }
     } else {
@@ -157,10 +160,15 @@ class DeleteCommand(
       val skippedHashes = mutableSetOf<String>()
 
       while (true) {
-        val largest = service.findLargestDuplicateGroup(
-          snapshot.id.value,
-          excludedHashes = skippedHashes
-        )
+        val largest = StatusSpinner(
+          currentContext.terminal,
+          "Finding largest duplicate file group..."
+        ).use {
+          service.findLargestDuplicateGroup(
+            snapshot.id.value,
+            excludedHashes = skippedHashes
+          )
+        }
         if (largest == null) {
           if (skippedHashes.isEmpty()) {
             echo("No duplicates found.")
@@ -187,21 +195,29 @@ class DeleteCommand(
           continue
         }
 
-        val results = service.deleteDuplicateFiles(snapshot.id.value, selectedPaths)
+        val results = StatusSpinner(
+          currentContext.terminal,
+          "Deleting ${selectedPaths.size} duplicate file(s)..."
+        ).use { spinner ->
+          service.deleteDuplicateFiles(snapshot.id.value, selectedPaths) { msg ->
+            spinner.update(msg)
+          }
+        }
         echo("Deleted ${results.size} duplicate file(s):")
         for (res in results) {
+          val displayPath = formatDisplayPath(res.path)
           when {
             res.isSymlink && res.deletedFromDisk -> {
-              echo("  - ${res.path} [symlink] (target preserved)")
+              echo("  - $displayPath [symlink] (target preserved)")
             }
             res.isSymlink -> {
-              echo("  - ${res.path} [symlink] (from db only, not found on disk; target preserved)")
+              echo("  - $displayPath [symlink] (from db only, not found on disk; target preserved)")
             }
             res.deletedFromDisk -> {
-              echo("  - ${res.path}")
+              echo("  - $displayPath")
             }
             else -> {
-              echo("  - ${res.path} (from db only, not found on disk)")
+              echo("  - $displayPath (from db only, not found on disk)")
             }
           }
         }

@@ -87,6 +87,8 @@ data class DuplicateFolderGroup(
  * @property folderDeletedFromDisk Whether the directory itself was removed from the filesystem.
  * @property deletedFromDb Whether the folder record was deleted from the database.
  * @property hasMatchingDuplicate Whether a 100% matching duplicate folder existed prior to deletion.
+ * @property isSymlink Whether the deleted entry was a symbolic link rather than a real folder.
+ * @property folderDeletionError Optional diagnostic reason if the directory could not be removed.
  */
 data class FolderDeletionResult(
   val path: String,
@@ -95,5 +97,6 @@ data class FolderDeletionResult(
   val folderDeletedFromDisk: Boolean,
   val deletedFromDb: Boolean,
   val hasMatchingDuplicate: Boolean,
-  val isSymlink: Boolean = false
+  val isSymlink: Boolean = false,
+  val folderDeletionError: String? = null
 )

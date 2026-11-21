@@ -25,6 +25,7 @@ import com.cherba29.boveda.model.SnapshotSummary
 import com.cherba29.boveda.model.SymlinkEntry
 import com.cherba29.boveda.model.formatBytes
 import com.cherba29.boveda.model.formatBytesShort
+import com.cherba29.boveda.model.formatDisplayPath
 import com.cherba29.boveda.model.formatDuration
 import com.cherba29.boveda.scanner.DirectoryScanner
 import com.cherba29.boveda.scanner.DiscoveredFile
@@ -36,9 +37,12 @@ import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.terminal.Terminal
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
+import java.io.IOException
+import java.nio.file.DirectoryNotEmptyException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.DosFileAttributeView
 import java.sql.Connection
 import java.util.Locale
 import kotlin.io.path.invariantSeparatorsPathString
@@ -578,6 +582,99 @@ class BovedaService(
     return byPath.values.sortedBy { it.path }
   }
 
+  private fun clearReadOnlyAttributes(path: Path) {
+    try {
+      val dosView = Files.getFileAttributeView(
+        path,
+        DosFileAttributeView::class.java,
+        LinkOption.NOFOLLOW_LINKS
+      )
+      if (dosView != null) {
+        val attrs = dosView.readAttributes()
+        if (attrs.isReadOnly) {
+          dosView.setReadOnly(false)
+        }
+        if (attrs.isSystem) {
+          dosView.setSystem(false)
+        }
+      }
+    } catch (_: Exception) {
+      // Ignore on filesystems without DOS attributes
+    }
+    try {
+      if (!Files.isSymbolicLink(path)) {
+        path.toFile().setWritable(true)
+      }
+    } catch (_: Exception) {
+      // Best-effort fallback
+    }
+  }
+
+  private fun describeRemainingEntries(dir: Path): String {
+    return try {
+      val names = Files.list(dir).use { stream ->
+        stream.limit(4).map { it.fileName?.toString() ?: it.toString() }.toList()
+      }
+      if (names.isEmpty()) {
+        "directory not empty"
+      } else {
+        val shown = names.take(3).joinToString(", ")
+        val more = if (names.size > 3) ", ..." else ""
+        "directory not empty (remaining: $shown$more)"
+      }
+    } catch (_: Exception) {
+      "directory not empty"
+    }
+  }
+
+  /**
+   * Deletes [path] (file, symlink, or empty directory) safely without following symlinks.
+   * Clears Windows/DOS read-only/system attributes and retries briefly on transient OS locks
+   * (e.g., Windows Explorer, Defender, or Search Indexer holding a handle after bulk deletions).
+   */
+  private fun deletePathWithRetry(path: Path, maxAttempts: Int = 4): Pair<Boolean, String?> {
+    if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+      return false to null
+    }
+    var lastError: String? = null
+    for (attempt in 1..maxAttempts) {
+      try {
+        return Files.deleteIfExists(path) to null
+      } catch (_: DirectoryNotEmptyException) {
+        return false to describeRemainingEntries(path)
+      } catch (e: IOException) {
+        lastError = e.message ?: e::class.simpleName
+        clearReadOnlyAttributes(path)
+        if (attempt < maxAttempts) {
+          try {
+            Thread.sleep(50L * attempt)
+          } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            break
+          }
+        }
+      } catch (e: Exception) {
+        return false to (e.message ?: e::class.simpleName)
+      }
+    }
+    return false to lastError
+  }
+
+  private fun cleanupOrphanedFiles(fileIds: Collection<EntityID<Int>>) {
+    if (fileIds.isEmpty()) return
+    for (chunk in fileIds.distinct().chunked(500)) {
+      val stillReferenced = RepoFileInstances.select(RepoFileInstances.file)
+        .where { RepoFileInstances.file inList chunk }
+        .withDistinct()
+        .map { it[RepoFileInstances.file] }
+        .toSet()
+      val orphaned = chunk.filter { it !in stillReferenced }
+      if (orphaned.isNotEmpty()) {
+        RepoFiles.deleteWhere { RepoFiles.id inList orphaned }
+      }
+    }
+  }
+
   /**
    * Removes a file or symlink instance from the database and disk within [snapshotId].
    * For regular files with no duplicates, deletion fails unless [force] is true.
@@ -609,20 +706,10 @@ class BovedaService(
       } else {
         path
       }
-      val deletedFromDisk = try {
-        Files.deleteIfExists(actualDiskPath)
-      } catch (_: Exception) {
-        false
-      }
+      val (deletedFromDisk, _) = deletePathWithRetry(actualDiskPath)
 
       instance.delete()
-
-      val remaining = RepoFileInstances.select(RepoFileInstances.id)
-        .where { RepoFileInstances.file eq fileEntityId }
-        .count()
-      if (remaining == 0L) {
-        RepoFiles.deleteWhere { RepoFiles.id eq fileEntityId }
-      }
+      cleanupOrphanedFiles(listOf(fileEntityId))
 
       FileDeletionResult(
         path = pathStr,
@@ -637,50 +724,43 @@ class BovedaService(
    * Deletes multiple duplicate file or symlink instances by path from disk and database in
    * [snapshotId]. For symlinks, deletes only the symlink itself without affecting its target.
    */
-  fun deleteDuplicateFiles(snapshotId: Int, paths: List<String>): List<FileDeletionResult> =
-    transaction(database) {
-      val fileIdsToCheck = mutableSetOf<EntityID<Int>>()
-      val results = paths.map { pathStr ->
-        val p = Path.of(pathStr)
-        val deletedFromDisk = try {
-          Files.deleteIfExists(p)
-        } catch (_: Exception) {
-          false
-        }
+  fun deleteDuplicateFiles(
+    snapshotId: Int,
+    paths: List<String>,
+    onProgress: ((String) -> Unit)? = null
+  ): List<FileDeletionResult> = transaction(database) {
+    val fileIdsToCheck = mutableSetOf<EntityID<Int>>()
+    val results = paths.mapIndexed { idx, pathStr ->
+      onProgress?.invoke("Deleting file ${idx + 1}/${paths.size}: ${formatDisplayPath(pathStr)}")
+      val (deletedFromDisk, _) = deletePathWithRetry(Path.of(pathStr))
 
-        val instance = RepoFileInstance.find {
-          (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq pathStr)
-        }.firstOrNull()
+      val instance = RepoFileInstance.find {
+        (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.path eq pathStr)
+      }.firstOrNull()
 
-        val isSymlink = instance?.isSymlink ?: false
-        val deletedFromDb = if (instance != null) {
-          fileIdsToCheck.add(instance.file.id)
-          instance.delete()
-          true
-        } else {
-          false
-        }
-
-        FileDeletionResult(
-          path = pathStr,
-          deletedFromDisk = deletedFromDisk,
-          deletedFromDb = deletedFromDb,
-          hasDuplicates = !isSymlink,
-          isSymlink = isSymlink
-        )
+      val isSymlink = instance?.isSymlink ?: false
+      val deletedFromDb = if (instance != null) {
+        fileIdsToCheck.add(instance.file.id)
+        instance.delete()
+        true
+      } else {
+        false
       }
 
-      for (fileId in fileIdsToCheck) {
-        val remaining = RepoFileInstances.select(RepoFileInstances.id)
-          .where { RepoFileInstances.file eq fileId }
-          .count()
-        if (remaining == 0L) {
-          RepoFiles.deleteWhere { RepoFiles.id eq fileId }
-        }
-      }
-
-      results
+      FileDeletionResult(
+        path = pathStr,
+        deletedFromDisk = deletedFromDisk,
+        deletedFromDb = deletedFromDb,
+        hasDuplicates = !isSymlink,
+        isSymlink = isSymlink
+      )
     }
+
+    onProgress?.invoke("Cleaning up orphaned database records...")
+    cleanupOrphanedFiles(fileIdsToCheck)
+
+    results
+  }
 
   /**
    * Retrieves all groups of duplicate non-symlink file instances in [snapshotId] sharing content
@@ -1158,14 +1238,16 @@ class BovedaService(
   fun printQueryResults(snapshotId: Int? = null, out: (String) -> Unit = ::println) {
     out("### ==== Selecting from DB ==== ###")
     queryFiles(snapshotId).forEach { record ->
+      val displayPath = formatDisplayPath(record.path)
       out(
-        "snapshot=${record.snapshotId} size=${record.size} path=${record.path} hash=${record.hash}"
+        "snapshot=${record.snapshotId} size=${record.size} path=$displayPath hash=${record.hash}"
       )
     }
 
     queryFilesWithDuplicateRank(snapshotId).forEach { record ->
+      val displayPath = formatDisplayPath(record.path)
       out(
-        "${record.snapshotId} ${record.size} ${record.path} ${record.duplicateRank} ${record.hash}"
+        "${record.snapshotId} ${record.size} $displayPath ${record.duplicateRank} ${record.hash}"
       )
     }
   }
@@ -1552,7 +1634,7 @@ class BovedaService(
           val statusStr = if (snapshot.isCompleted) "Completed" else "In Progress"
           row(
             snapshot.id.toString(),
-            snapshot.rootPath,
+            formatDisplayPath(snapshot.rootPath),
             String.format(Locale.US, "%,d", snapshot.fileCount),
             formatBytesShort(snapshot.totalBytes),
             statusStr
@@ -1656,10 +1738,12 @@ class BovedaService(
         out("    Hash: ${group.hash}")
         out("    Paths:")
         group.paths.forEach { path ->
-          out("      - $path")
+          out("      - ${formatDisplayPath(path)}")
         }
         group.symlinkPaths.forEach { sym ->
-          out("      - ${sym.path} [symlink -> ${sym.target}]")
+          val symPath = formatDisplayPath(sym.path)
+          val symTarget = formatDisplayPath(sym.target)
+          out("      - $symPath [symlink -> $symTarget]")
         }
       }
     }
@@ -1991,7 +2075,7 @@ class BovedaService(
 
     pairs.forEachIndexed { index, pair ->
       val num = (index + 1).toString().padStart(2)
-      out("$num. ${pair.folder1} <-> ${pair.folder2}")
+      out("$num. ${formatDisplayPath(pair.folder1)} <-> ${formatDisplayPath(pair.folder2)}")
       out("  Same Files:                 ${String.format(Locale.US, "%,d", pair.sameFiles)} files")
       out(
         "  Different Files:            ${String.format(
@@ -2021,15 +2105,17 @@ class BovedaService(
         out("  Top $topCount Largest Duplicate File(s):")
         pair.topDuplicateFiles.forEachIndexed { fIdx, file ->
           out("    ${fIdx + 1}. ${file.fileName} (${formatBytes(file.size)})")
-          out("       Folder 1: ${file.path1}")
-          out("       Folder 2: ${file.path2}")
+          out("       Folder 1: ${formatDisplayPath(file.path1)}")
+          out("       Folder 2: ${formatDisplayPath(file.path2)}")
         }
       }
 
       if (pair.symlinks.isNotEmpty()) {
         out("  Symlinks:")
         pair.symlinks.forEach { sym ->
-          out("    - ${sym.path} [symlink -> ${sym.target}]")
+          val symPath = formatDisplayPath(sym.path)
+          val symTarget = formatDisplayPath(sym.target)
+          out("    - $symPath [symlink -> $symTarget]")
         }
       }
 
@@ -2041,23 +2127,40 @@ class BovedaService(
     out("")
   }
 
-  private fun hasChildFolders(conn: Connection, snapshotId: Int, folderPath: String): Boolean {
-    val prefix = if (folderPath == "/") "/" else "$folderPath/"
-    val sql = """
-      SELECT 1
-      FROM folders
-      WHERE snapshot_id = ?
-        AND "path" <> ?
-        AND LEFT("path", ?) = ?
-      LIMIT 1
-    """.trimIndent()
-    return conn.prepareStatement(sql).use { stmt ->
+  internal fun findParentFolderPaths(
+    conn: Connection,
+    snapshotId: Int,
+    candidatePaths: Set<String>
+  ): Set<String> {
+    if (candidatePaths.isEmpty()) return emptySet()
+    val hasChildren = HashSet<String>()
+    val sql = """SELECT "path" FROM folders WHERE snapshot_id = ?"""
+    conn.prepareStatement(sql).use { stmt ->
       stmt.setInt(1, snapshotId)
-      stmt.setString(2, folderPath)
-      stmt.setInt(3, prefix.length)
-      stmt.setString(4, prefix)
-      stmt.executeQuery().use { rs -> rs.next() }
+      stmt.executeQuery().use { rs ->
+        while (rs.next()) {
+          val p = rs.getString(1)
+          var slashIdx = p.lastIndexOf('/')
+          while (slashIdx > 0) {
+            val ancestor = p.substring(0, slashIdx)
+            if (ancestor in candidatePaths) {
+              hasChildren.add(ancestor)
+            }
+            if (slashIdx == 2 && p[1] == ':') {
+              val driveRoot = p.substring(0, 3)
+              if (driveRoot != p && driveRoot in candidatePaths) {
+                hasChildren.add(driveRoot)
+              }
+            }
+            slashIdx = ancestor.lastIndexOf('/')
+          }
+          if (p.length > 1 && p.startsWith('/') && "/" in candidatePaths) {
+            hasChildren.add("/")
+          }
+        }
+      }
     }
+    return hasChildren
   }
 
   private fun computeFolderContentSignature(fileIds: List<Int>): String {
@@ -2116,129 +2219,229 @@ class BovedaService(
    * Retrieves all groups of 100% matching folders in [snapshotId] that contain the exact same
    * multiset of files (and have no child subfolders in the snapshot).
    */
-  fun getIdenticalFolderGroups(snapshotId: Int): List<DuplicateFolderGroup> =
-    transaction(database) {
-      val conn = TransactionManager.current().connection.connection as Connection
+  fun getIdenticalFolderGroups(
+    snapshotId: Int,
+    onProgress: ((String) -> Unit)? = null
+  ): List<DuplicateFolderGroup> = transaction(database) {
+    val conn = TransactionManager.current().connection.connection as Connection
 
-      data class CandidateFolder(
-        val folderId: Int,
-        val path: String,
-        val fileCount: Int,
-        val totalBytes: Long
-      )
+    data class CandidateFolder(
+      val folderId: Int,
+      val path: String,
+      val fileCount: Int,
+      val totalBytes: Long
+    )
 
-      val candidateSql = """
-        SELECT folder_id, folder_path, inst_count, total_bytes
+    onProgress?.invoke("Scanning database for candidate 100% matching folders...")
+    val candidateSql = """
+      SELECT folder_id, folder_path, inst_count, total_bytes
+      FROM (
+        SELECT
+          fs.folder_id,
+          fs.folder_path,
+          fs.inst_count,
+          fs.total_bytes,
+          COUNT(*) OVER (PARTITION BY fs.inst_count, fs.total_bytes) AS bucket_size
         FROM (
           SELECT
-            fs.folder_id,
-            fs.folder_path,
-            fs.inst_count,
-            fs.total_bytes,
-            COUNT(*) OVER (PARTITION BY fs.inst_count, fs.total_bytes) AS bucket_size
-          FROM (
-            SELECT
-              fi.folder_id,
-              f."path" AS folder_path,
-              COUNT(*) AS inst_count,
-              COALESCE(SUM(fl."size"), 0) AS total_bytes
-            FROM file_instances fi
-            JOIN files fl ON fi.file_id = fl.id
-            JOIN folders f ON fi.folder_id = f.id
-            WHERE fi.snapshot_id = ?
-              AND fi.is_symlink = FALSE
-            GROUP BY fi.folder_id, f."path"
-            HAVING COUNT(*) > 0
-          ) fs
-        ) ranked
-        WHERE bucket_size > 1
-        ORDER BY total_bytes DESC, inst_count DESC, folder_path ASC
-      """.trimIndent()
+            fi.folder_id,
+            f."path" AS folder_path,
+            COUNT(*) AS inst_count,
+            COALESCE(SUM(fl."size"), 0) AS total_bytes
+          FROM file_instances fi
+          JOIN files fl ON fi.file_id = fl.id
+          JOIN folders f ON fi.folder_id = f.id
+          WHERE fi.snapshot_id = ?
+            AND fi.is_symlink = FALSE
+          GROUP BY fi.folder_id, f."path"
+          HAVING COUNT(*) > 0
+        ) fs
+      ) ranked
+      WHERE bucket_size > 1
+      ORDER BY total_bytes DESC, inst_count DESC, folder_path ASC
+    """.trimIndent()
 
-      val candidates = mutableListOf<CandidateFolder>()
-      conn.prepareStatement(candidateSql).use { stmt ->
+    val candidates = mutableListOf<CandidateFolder>()
+    conn.prepareStatement(candidateSql).use { stmt ->
+      stmt.setInt(1, snapshotId)
+      stmt.executeQuery().use { rs ->
+        while (rs.next()) {
+          candidates.add(
+            CandidateFolder(
+              folderId = rs.getInt("folder_id"),
+              path = rs.getString("folder_path"),
+              fileCount = rs.getInt("inst_count"),
+              totalBytes = rs.getLong("total_bytes")
+            )
+          )
+        }
+      }
+    }
+
+    if (candidates.isEmpty()) return@transaction emptyList()
+
+    onProgress?.invoke("Filtering out folders with subfolders (${candidates.size} candidates)...")
+    val candidatePathSet = candidates.mapTo(HashSet(candidates.size)) { it.path }
+    val parentPaths = findParentFolderPaths(conn, snapshotId, candidatePathSet)
+    val leafCandidates = candidates.filter { it.path !in parentPaths }
+    if (leafCandidates.size < 2) return@transaction emptyList()
+
+    onProgress?.invoke(
+      "Comparing file contents across ${leafCandidates.size} leaf candidate folder(s)..."
+    )
+
+    data class RawFolderGroup(
+      val signature: String,
+      val fileCount: Int,
+      val folderBytes: Long,
+      val folderIds: List<Int>,
+      val paths: List<String>
+    )
+
+    val rawGroups = mutableListOf<RawFolderGroup>()
+    val byBucket = leafCandidates.groupBy { Pair(it.fileCount, it.totalBytes) }
+
+    val eligibleBuckets = byBucket.filterValues { it.size >= 2 }
+    val allEligibleFolders = eligibleBuckets.values.flatten()
+    if (allEligibleFolders.isEmpty()) return@transaction emptyList()
+
+    val fileIdsByFolder = HashMap<Int, MutableList<Int>>(allEligibleFolders.size)
+    for (chunk in allEligibleFolders.chunked(500)) {
+      val placeholders = chunk.joinToString(",") { "?" }
+      val filesSql = """
+        SELECT folder_id, file_id
+        FROM file_instances
+        WHERE snapshot_id = ?
+          AND is_symlink = FALSE
+          AND folder_id IN ($placeholders)
+        ORDER BY folder_id, file_id
+      """.trimIndent()
+      conn.prepareStatement(filesSql).use { stmt ->
         stmt.setInt(1, snapshotId)
+        chunk.forEachIndexed { idx, folder -> stmt.setInt(idx + 2, folder.folderId) }
         stmt.executeQuery().use { rs ->
           while (rs.next()) {
-            candidates.add(
-              CandidateFolder(
-                folderId = rs.getInt("folder_id"),
-                path = rs.getString("folder_path"),
-                fileCount = rs.getInt("inst_count"),
-                totalBytes = rs.getLong("total_bytes")
-              )
-            )
+            val fId = rs.getInt("folder_id")
+            val fileId = rs.getInt("file_id")
+            fileIdsByFolder.getOrPut(fId) { mutableListOf() }.add(fileId)
           }
         }
       }
-
-      if (candidates.isEmpty()) return@transaction emptyList()
-
-      val groups = mutableListOf<DuplicateFolderGroup>()
-      val byBucket = candidates.groupBy { Pair(it.fileCount, it.totalBytes) }
-
-      for ((bucketKey, bucketFolders) in byBucket) {
-        val leafFolders = bucketFolders.filter { !hasChildFolders(conn, snapshotId, it.path) }
-        if (leafFolders.size < 2) continue
-
-        val fileIdsByFolder = HashMap<Int, MutableList<Int>>(leafFolders.size)
-        for (chunk in leafFolders.chunked(500)) {
-          val placeholders = chunk.joinToString(",") { "?" }
-          val filesSql = """
-            SELECT folder_id, file_id
-            FROM file_instances
-            WHERE snapshot_id = ?
-              AND is_symlink = FALSE
-              AND folder_id IN ($placeholders)
-            ORDER BY folder_id, file_id
-          """.trimIndent()
-          conn.prepareStatement(filesSql).use { stmt ->
-            stmt.setInt(1, snapshotId)
-            chunk.forEachIndexed { idx, folder -> stmt.setInt(idx + 2, folder.folderId) }
-            stmt.executeQuery().use { rs ->
-              while (rs.next()) {
-                val fId = rs.getInt("folder_id")
-                val fileId = rs.getInt("file_id")
-                fileIdsByFolder.getOrPut(fId) { mutableListOf() }.add(fileId)
-              }
-            }
-          }
-        }
-
-        val bySignature = linkedMapOf<String, MutableList<CandidateFolder>>()
-        for (folder in leafFolders) {
-          val fileIds = fileIdsByFolder[folder.folderId] ?: continue
-          if (fileIds.size != bucketKey.first) continue
-          val signature = computeFolderContentSignature(fileIds)
-          bySignature.getOrPut(signature) { mutableListOf() }.add(folder)
-        }
-
-        for ((signature, matchingFolders) in bySignature) {
-          if (matchingFolders.size >= 2) {
-            val sortedPaths = matchingFolders.map { it.path }.sorted()
-            val folderIds = matchingFolders.map { it.folderId }
-            val symlinks = findSymlinksForFolders(snapshotId, folderIds, sortedPaths)
-            groups.add(
-              DuplicateFolderGroup(
-                signature = signature,
-                fileCount = bucketKey.first,
-                folderBytes = bucketKey.second,
-                paths = sortedPaths,
-                symlinkPaths = symlinks
-              )
-            )
-          }
-        }
-      }
-
-      groups.sortedWith(
-        compareByDescending<DuplicateFolderGroup> { it.wastedBytes }
-          .thenByDescending { it.totalDuplicateBytes }
-          .thenByDescending { it.folderBytes }
-          .thenByDescending { it.fileCount }
-          .thenBy { it.paths.first() }
-      )
     }
+
+    for ((bucketKey, leafFolders) in eligibleBuckets) {
+      val bySignature = linkedMapOf<String, MutableList<CandidateFolder>>()
+      for (folder in leafFolders) {
+        val fileIds = fileIdsByFolder[folder.folderId] ?: continue
+        if (fileIds.size != bucketKey.first) continue
+        val signature = computeFolderContentSignature(fileIds)
+        bySignature.getOrPut(signature) { mutableListOf() }.add(folder)
+      }
+
+      for ((signature, matchingFolders) in bySignature) {
+        if (matchingFolders.size >= 2) {
+          val sorted = matchingFolders.sortedBy { it.path }
+          rawGroups.add(
+            RawFolderGroup(
+              signature = signature,
+              fileCount = bucketKey.first,
+              folderBytes = bucketKey.second,
+              folderIds = sorted.map { it.folderId },
+              paths = sorted.map { it.path }
+            )
+          )
+        }
+      }
+    }
+
+    if (rawGroups.isEmpty()) return@transaction emptyList()
+
+    onProgress?.invoke("Loading associated symlinks for ${rawGroups.size} duplicate group(s)...")
+    val allPaths = rawGroups.flatMap { it.paths }
+    val allFolderIds = rawGroups.flatMap { it.folderIds }
+    val symlinksByTarget = findSymlinksPointingTo(snapshotId, allPaths).groupBy { it.target }
+    val symlinksByFolderId = HashMap<Int, MutableList<SymlinkEntry>>()
+    for (chunk in allFolderIds.distinct().chunked(500)) {
+      RepoFileInstances.select(
+        RepoFileInstances.folder,
+        RepoFileInstances.path,
+        RepoFileInstances.symlinkTarget
+      ).where {
+        (RepoFileInstances.snapshot eq snapshotId) and
+          (RepoFileInstances.isSymlink eq true) and
+          (RepoFileInstances.folder inList chunk.map { EntityID(it, RepoFolders) })
+      }.forEach { row ->
+        val fId = row[RepoFileInstances.folder].value
+        val entry = SymlinkEntry(
+          path = row[RepoFileInstances.path],
+          target = row[RepoFileInstances.symlinkTarget] ?: ""
+        )
+        symlinksByFolderId.getOrPut(fId) { mutableListOf() }.add(entry)
+      }
+    }
+
+    rawGroups.map { rg ->
+      val groupSymlinks = linkedMapOf<String, SymlinkEntry>()
+      for (p in rg.paths) {
+        symlinksByTarget[p]?.forEach { groupSymlinks[it.path] = it }
+      }
+      for (fId in rg.folderIds) {
+        symlinksByFolderId[fId]?.forEach { groupSymlinks.putIfAbsent(it.path, it) }
+      }
+      DuplicateFolderGroup(
+        signature = rg.signature,
+        fileCount = rg.fileCount,
+        folderBytes = rg.folderBytes,
+        paths = rg.paths,
+        symlinkPaths = groupSymlinks.values.sortedBy { it.path }
+      )
+    }.sortedWith(
+      compareByDescending<DuplicateFolderGroup> { it.wastedBytes }
+        .thenByDescending { it.totalDuplicateBytes }
+        .thenByDescending { it.folderBytes }
+        .thenByDescending { it.fileCount }
+        .thenBy { it.paths.first() }
+    )
+  }
+
+  /**
+   * Populates up to 5 largest sample files for [group] within [snapshotId] for display context.
+   */
+  fun populateFolderGroupSamples(
+    snapshotId: Int,
+    group: DuplicateFolderGroup
+  ): DuplicateFolderGroup = transaction(database) {
+    if (group.paths.isEmpty()) return@transaction group
+    val sampleFolderPath = group.paths.first()
+    val folderEntity = RepoFolder.find {
+      (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq sampleFolderPath)
+    }.firstOrNull() ?: return@transaction group
+
+    val conn = TransactionManager.current().connection.connection as Connection
+    val sampleSql = """
+      SELECT fi."path" AS file_path, fl."size" AS sz
+      FROM file_instances fi
+      JOIN files fl ON fi.file_id = fl.id
+      WHERE fi.snapshot_id = ?
+        AND fi.folder_id = ?
+        AND fi.is_symlink = FALSE
+      ORDER BY fl."size" DESC, fi."path" ASC
+      LIMIT 5
+    """.trimIndent()
+    val samples = mutableListOf<Pair<String, Long>>()
+    conn.prepareStatement(sampleSql).use { stmt ->
+      stmt.setInt(1, snapshotId)
+      stmt.setInt(2, folderEntity.id.value)
+      stmt.executeQuery().use { rs ->
+        while (rs.next()) {
+          val filePath = rs.getString("file_path")
+          val name = Path.of(filePath).fileName?.toString() ?: filePath
+          samples.add(name to rs.getLong("sz"))
+        }
+      }
+    }
+    group.copy(sampleFiles = samples)
+  }
 
   /**
    * Finds the 100% matching duplicate folder group in [snapshotId] where most storage is wasted,
@@ -2246,57 +2449,37 @@ class BovedaService(
    */
   fun findLargestIdenticalFolderGroup(
     snapshotId: Int,
-    excludedSignatures: Set<String> = emptySet()
+    excludedSignatures: Set<String> = emptySet(),
+    onProgress: ((String) -> Unit)? = null
   ): DuplicateFolderGroup? = transaction(database) {
-    val candidate = getIdenticalFolderGroups(snapshotId)
+    val candidate = getIdenticalFolderGroups(snapshotId, onProgress)
       .firstOrNull { it.signature !in excludedSignatures }
       ?: return@transaction null
-
-    val sampleFolderPath = candidate.paths.first()
-    val folderEntity = RepoFolder.find {
-      (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq sampleFolderPath)
-    }.firstOrNull()
-
-    val sampleFiles = if (folderEntity != null) {
-      val conn = TransactionManager.current().connection.connection as Connection
-      val sampleSql = """
-        SELECT fi."path" AS file_path, fl."size" AS sz
-        FROM file_instances fi
-        JOIN files fl ON fi.file_id = fl.id
-        WHERE fi.snapshot_id = ?
-          AND fi.folder_id = ?
-          AND fi.is_symlink = FALSE
-        ORDER BY fl."size" DESC, fi."path" ASC
-        LIMIT 5
-      """.trimIndent()
-      val samples = mutableListOf<Pair<String, Long>>()
-      conn.prepareStatement(sampleSql).use { stmt ->
-        stmt.setInt(1, snapshotId)
-        stmt.setInt(2, folderEntity.id.value)
-        stmt.executeQuery().use { rs ->
-          while (rs.next()) {
-            val filePath = rs.getString("file_path")
-            val name = Path.of(filePath).fileName?.toString() ?: filePath
-            samples.add(name to rs.getLong("sz"))
-          }
-        }
-      }
-      samples
-    } else {
-      emptyList()
-    }
-
-    candidate.copy(sampleFiles = sampleFiles)
+    populateFolderGroupSamples(snapshotId, candidate)
   }
 
   private fun deleteFolderInternal(
     snapshotId: Int,
     folder: RepoFolder,
     hasMatchingDuplicate: Boolean,
-    fallbackDiskPath: Path? = null
+    fallbackDiskPath: Path? = null,
+    onProgress: ((String) -> Unit)? = null
   ): FolderDeletionResult {
     val folderPathStr = folder.path
     val folderId = folder.id
+    val displayFolder = formatDisplayPath(folderPathStr)
+
+    val dirPath = Path.of(folderPathStr)
+    val actualDirPath = if (Files.exists(dirPath, LinkOption.NOFOLLOW_LINKS)) {
+      dirPath
+    } else {
+      fallbackDiskPath ?: dirPath
+    }
+    if (Files.exists(actualDirPath, LinkOption.NOFOLLOW_LINKS) &&
+      !Files.isSymbolicLink(actualDirPath)
+    ) {
+      clearReadOnlyAttributes(actualDirPath)
+    }
 
     val instances = RepoFileInstances.select(RepoFileInstances.file, RepoFileInstances.path)
       .where {
@@ -2306,43 +2489,30 @@ class BovedaService(
 
     val fileIdsToCheck = mutableSetOf<EntityID<Int>>()
     var filesDeletedFromDisk = 0
-    for ((fileId, pathStr) in instances) {
+    val totalInstances = instances.size
+    for ((idx, pair) in instances.withIndex()) {
+      val (fileId, pathStr) = pair
       fileIdsToCheck.add(fileId)
-      val deleted = try {
-        Files.deleteIfExists(Path.of(pathStr))
-      } catch (_: Exception) {
-        false
+      if (idx == 0 || (idx + 1) % 50 == 0 || idx + 1 == totalInstances) {
+        onProgress?.invoke(
+          "Deleting files in $displayFolder (${idx + 1}/$totalInstances)..."
+        )
       }
+      val (deleted, _) = deletePathWithRetry(Path.of(pathStr))
       if (deleted) filesDeletedFromDisk++
     }
 
+    onProgress?.invoke("Updating database for $displayFolder...")
     val filesDeletedFromDb = RepoFileInstances.deleteWhere {
       (RepoFileInstances.snapshot eq snapshotId) and (RepoFileInstances.folder eq folderId)
     }
 
     RepoFolders.deleteWhere { RepoFolders.id eq folderId }
     folderCache.invalidate(Pair(snapshotId, folderPathStr))
+    cleanupOrphanedFiles(fileIdsToCheck)
 
-    for (fileId in fileIdsToCheck) {
-      val remaining = RepoFileInstances.select(RepoFileInstances.id)
-        .where { RepoFileInstances.file eq fileId }
-        .count()
-      if (remaining == 0L) {
-        RepoFiles.deleteWhere { RepoFiles.id eq fileId }
-      }
-    }
-
-    val dirPath = Path.of(folderPathStr)
-    val actualDirPath = if (Files.exists(dirPath, LinkOption.NOFOLLOW_LINKS)) {
-      dirPath
-    } else {
-      fallbackDiskPath ?: dirPath
-    }
-    val folderDeletedFromDisk = try {
-      Files.deleteIfExists(actualDirPath)
-    } catch (_: Exception) {
-      false
-    }
+    onProgress?.invoke("Removing directory $displayFolder...")
+    val (folderDeletedFromDisk, folderDeletionError) = deletePathWithRetry(actualDirPath)
 
     return FolderDeletionResult(
       path = folderPathStr,
@@ -2350,7 +2520,8 @@ class BovedaService(
       filesDeletedFromDb = filesDeletedFromDb,
       folderDeletedFromDisk = folderDeletedFromDisk,
       deletedFromDb = true,
-      hasMatchingDuplicate = hasMatchingDuplicate
+      hasMatchingDuplicate = hasMatchingDuplicate,
+      folderDeletionError = folderDeletionError
     )
   }
 
@@ -2366,20 +2537,10 @@ class BovedaService(
     } else {
       fallbackDiskPath ?: diskPath
     }
-    val deletedFromDisk = try {
-      Files.deleteIfExists(actualDiskPath)
-    } catch (_: Exception) {
-      false
-    }
+    val (deletedFromDisk, deletionError) = deletePathWithRetry(actualDiskPath)
 
     symlinkInstance.delete()
-
-    val remaining = RepoFileInstances.select(RepoFileInstances.id)
-      .where { RepoFileInstances.file eq fileEntityId }
-      .count()
-    if (remaining == 0L) {
-      RepoFiles.deleteWhere { RepoFiles.id eq fileEntityId }
-    }
+    cleanupOrphanedFiles(listOf(fileEntityId))
 
     return FolderDeletionResult(
       path = pathStr,
@@ -2388,7 +2549,8 @@ class BovedaService(
       folderDeletedFromDisk = deletedFromDisk,
       deletedFromDb = true,
       hasMatchingDuplicate = false,
-      isSymlink = true
+      isSymlink = true,
+      folderDeletionError = deletionError
     )
   }
 
@@ -2429,46 +2591,49 @@ class BovedaService(
    * Deletes multiple duplicate folders or symlinks by normalized path from disk and database in
    * [snapshotId]. For symlinks, deletes only the symlink itself without affecting its target.
    */
-  fun deleteDuplicateFolders(snapshotId: Int, paths: List<String>): List<FolderDeletionResult> =
-    transaction(database) {
-      paths.map { pathStr ->
-        val symlinkInstance = RepoFileInstance.find {
-          (RepoFileInstances.snapshot eq snapshotId) and
-            (RepoFileInstances.path eq pathStr) and
-            (RepoFileInstances.isSymlink eq true)
+  fun deleteDuplicateFolders(
+    snapshotId: Int,
+    paths: List<String>,
+    onProgress: ((String) -> Unit)? = null
+  ): List<FolderDeletionResult> = transaction(database) {
+    paths.mapIndexed { idx, pathStr ->
+      val prefix = "Deleting ${idx + 1}/${paths.size}: ${formatDisplayPath(pathStr)}"
+      onProgress?.invoke("$prefix...")
+      val symlinkInstance = RepoFileInstance.find {
+        (RepoFileInstances.snapshot eq snapshotId) and
+          (RepoFileInstances.path eq pathStr) and
+          (RepoFileInstances.isSymlink eq true)
+      }.firstOrNull()
+
+      if (symlinkInstance != null) {
+        deleteSymlinkAsFolderResult(symlinkInstance)
+      } else {
+        val folder = RepoFolder.find {
+          (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq pathStr)
         }.firstOrNull()
 
-        if (symlinkInstance != null) {
-          deleteSymlinkAsFolderResult(symlinkInstance)
+        if (folder != null) {
+          deleteFolderInternal(
+            snapshotId = snapshotId,
+            folder = folder,
+            hasMatchingDuplicate = true,
+            onProgress = onProgress
+          )
         } else {
-          val folder = RepoFolder.find {
-            (RepoFolders.snapshot eq snapshotId) and (RepoFolders.path eq pathStr)
-          }.firstOrNull()
-
-          if (folder != null) {
-            deleteFolderInternal(
-              snapshotId = snapshotId,
-              folder = folder,
-              hasMatchingDuplicate = true
-            )
-          } else {
-            val deletedFromDisk = try {
-              Files.deleteIfExists(Path.of(pathStr))
-            } catch (_: Exception) {
-              false
-            }
-            FolderDeletionResult(
-              path = pathStr,
-              filesDeletedFromDisk = 0,
-              filesDeletedFromDb = 0,
-              folderDeletedFromDisk = deletedFromDisk,
-              deletedFromDb = false,
-              hasMatchingDuplicate = true
-            )
-          }
+          val (deletedFromDisk, deletionError) = deletePathWithRetry(Path.of(pathStr))
+          FolderDeletionResult(
+            path = pathStr,
+            filesDeletedFromDisk = 0,
+            filesDeletedFromDb = 0,
+            folderDeletedFromDisk = deletedFromDisk,
+            deletedFromDb = false,
+            hasMatchingDuplicate = true,
+            folderDeletionError = deletionError
+          )
         }
       }
     }
+  }
 }
 
 /**

@@ -6,6 +6,7 @@ import com.cherba29.boveda.cmds.resolveDatabasePath
 import com.cherba29.boveda.cmds.resolveSnapshot
 import com.cherba29.boveda.cmds.resolveSnapshotId
 import com.cherba29.boveda.logging.LoggingConfig
+import com.cherba29.boveda.model.formatDisplayPath
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -88,17 +89,19 @@ class PrintDuplicatesCommand(
     if (verbose) {
       echo("### ==== Duplicate Files in DB ==== ###")
       val duplicateCount = service.forEachDuplicate(snapshot.id.value) { record ->
+        val displayPath = formatDisplayPath(record.path)
         echo(
           "snapshot=${record.snapshotId} size=${record.size} " +
-            "path=${record.path} rank=${record.duplicateRank} hash=${record.hash}"
+            "path=$displayPath rank=${record.duplicateRank} hash=${record.hash}"
         )
       }
       if (duplicateCount > 0L) {
         service.forEachSymlinkToDuplicates(snapshot.id.value) { record ->
-          val target = record.symlinkTarget ?: ""
+          val displayPath = formatDisplayPath(record.path)
+          val target = formatDisplayPath(record.symlinkTarget ?: "")
           echo(
             "snapshot=${record.snapshotId} size=${record.size} " +
-              "path=${record.path} [symlink -> $target]"
+              "path=$displayPath [symlink -> $target]"
           )
         }
       } else {

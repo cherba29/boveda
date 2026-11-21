@@ -7,6 +7,8 @@ import com.cherba29.boveda.cmds.resolveSnapshot
 import com.cherba29.boveda.cmds.resolveSnapshotId
 import com.cherba29.boveda.logging.LoggingConfig
 import com.cherba29.boveda.model.DuplicateFolderGroup
+import com.cherba29.boveda.model.formatDisplayPath
+import com.cherba29.boveda.progress.StatusSpinner
 import com.cherba29.boveda.service.BovedaService
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
@@ -127,53 +129,80 @@ class DeleteCommand(
     }
 
     if (targetFolder != null) {
-      val result = try {
-        service.deleteFolder(snapshot.id.value, targetFolder, force = force)
-      } catch (e: IllegalArgumentException) {
-        throw UsageError(e.message ?: "Folder not found in database: $targetFolder")
-      } catch (e: IllegalStateException) {
-        throw UsageError(
-          e.message
-            ?: "Folder does not have a 100% matching duplicate folder: $targetFolder. " +
-            "Use --force to delete anyway."
-        )
+      val result = StatusSpinner(
+        currentContext.terminal,
+        "Deleting folder ${formatDisplayPath(targetFolder.toString())}..."
+      ).use {
+        try {
+          service.deleteFolder(snapshot.id.value, targetFolder, force = force)
+        } catch (e: IllegalArgumentException) {
+          throw UsageError(e.message ?: "Folder not found in database: $targetFolder")
+        } catch (e: IllegalStateException) {
+          throw UsageError(
+            e.message
+              ?: "Folder does not have a 100% matching duplicate folder: $targetFolder. " +
+              "Use --force to delete anyway."
+          )
+        }
       }
 
+      val displayPath = formatDisplayPath(result.path)
       when {
         result.isSymlink && result.folderDeletedFromDisk -> {
-          echo("Deleted symlink from disk and database (target preserved): ${result.path}")
+          echo("Deleted symlink from disk and database (target preserved): $displayPath")
         }
         result.isSymlink -> {
           echo(
-            "Deleted symlink from database (not found on disk; target preserved): ${result.path}"
+            "Deleted symlink from database (not found on disk; target preserved): $displayPath"
           )
         }
         result.folderDeletedFromDisk -> {
           echo(
-            "Deleted folder from disk and database: ${result.path} " +
+            "Deleted folder from disk and database: $displayPath " +
               "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
               "${result.filesDeletedFromDb} from database)"
           )
         }
         else -> {
+          val reason = result.folderDeletionError?.let { ": $it" } ?: ""
           echo(
-            "Deleted folder from database: ${result.path} " +
+            "Deleted folder from database: $displayPath " +
               "(${result.filesDeletedFromDisk} file(s) deleted from disk, " +
-              "${result.filesDeletedFromDb} from database; directory not removed from disk)"
+              "${result.filesDeletedFromDb} from database; " +
+              "directory not removed from disk$reason)"
           )
         }
       }
     } else {
       val defaultSelector = InteractiveDuplicateFolderSelector(currentContext.terminal)
       val skippedSignatures = mutableSetOf<String>()
+      val pendingGroups = ArrayDeque<DuplicateFolderGroup>()
+
+      val initialGroups = StatusSpinner(
+        currentContext.terminal,
+        "Finding 100% matching duplicate folders..."
+      ).use { spinner ->
+        service.getIdenticalFolderGroups(snapshot.id.value) { msg -> spinner.update(msg) }
+      }
+      pendingGroups.addAll(initialGroups)
+
+      var anyRealFolderDeleted = false
+      var promptedAtLeastOnce = false
 
       while (true) {
-        val largest = service.findLargestIdenticalFolderGroup(
-          snapshot.id.value,
-          excludedSignatures = skippedSignatures
-        )
-        if (largest == null) {
-          if (skippedSignatures.isEmpty()) {
+        if (pendingGroups.isEmpty() && anyRealFolderDeleted) {
+          anyRealFolderDeleted = false
+          val refreshed = StatusSpinner(
+            currentContext.terminal,
+            "Checking for newly exposed 100% matching duplicate folders..."
+          ).use { spinner ->
+            service.getIdenticalFolderGroups(snapshot.id.value) { msg -> spinner.update(msg) }
+          }.filter { it.signature !in skippedSignatures }
+          pendingGroups.addAll(refreshed)
+        }
+
+        if (pendingGroups.isEmpty()) {
+          if (!promptedAtLeastOnce && skippedSignatures.isEmpty()) {
             echo("No 100% matching duplicate folders found.")
           } else {
             echo("No more 100% matching duplicate folders found in database.")
@@ -181,10 +210,27 @@ class DeleteCommand(
           break
         }
 
-        val selectedPaths = if (folderSelector != null) {
-          folderSelector.invoke(largest)
+        val rawGroup = pendingGroups.removeFirst()
+        if (rawGroup.signature in skippedSignatures || rawGroup.paths.size < 2) {
+          continue
+        }
+
+        val currentGroup = if (rawGroup.sampleFiles.isEmpty()) {
+          StatusSpinner(
+            currentContext.terminal,
+            "Loading sample files for next duplicate folder group..."
+          ).use {
+            service.populateFolderGroupSamples(snapshot.id.value, rawGroup)
+          }
         } else {
-          defaultSelector.selectDuplicateFolders(largest)
+          rawGroup
+        }
+
+        promptedAtLeastOnce = true
+        val selectedPaths = if (folderSelector != null) {
+          folderSelector.invoke(currentGroup)
+        } else {
+          defaultSelector.selectDuplicateFolders(currentGroup)
         }
 
         if (selectedPaths == null) {
@@ -194,32 +240,62 @@ class DeleteCommand(
 
         if (selectedPaths.isEmpty()) {
           echo("No folders selected to delete. Skipping this duplicate folder group.")
-          skippedSignatures.add(largest.signature)
+          skippedSignatures.add(currentGroup.signature)
           continue
         }
 
-        val results = service.deleteDuplicateFolders(snapshot.id.value, selectedPaths)
+        val results = StatusSpinner(
+          currentContext.terminal,
+          "Deleting ${selectedPaths.size} duplicate folder(s)..."
+        ).use { spinner ->
+          service.deleteDuplicateFolders(snapshot.id.value, selectedPaths) { msg ->
+            spinner.update(msg)
+          }
+        }
         echo("Deleted ${results.size} duplicate folder(s):")
         for (res in results) {
+          val displayPath = formatDisplayPath(res.path)
           when {
             res.isSymlink && res.folderDeletedFromDisk -> {
-              echo("  - ${res.path} [symlink] (target preserved)")
+              echo("  - $displayPath [symlink] (target preserved)")
             }
             res.isSymlink -> {
-              echo("  - ${res.path} [symlink] (from db only, not found on disk; target preserved)")
+              echo("  - $displayPath [symlink] (from db only, not found on disk; target preserved)")
             }
             res.folderDeletedFromDisk -> {
               echo(
-                "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed)"
+                "  - $displayPath (${res.filesDeletedFromDisk} file(s) removed)"
               )
             }
             else -> {
+              val reason = res.folderDeletionError?.let { ": $it" } ?: ""
               echo(
-                "  - ${res.path} (${res.filesDeletedFromDisk} file(s) removed; " +
-                  "directory not removed from disk)"
+                "  - $displayPath (${res.filesDeletedFromDisk} file(s) removed; " +
+                  "directory not removed from disk$reason)"
               )
             }
           }
+        }
+
+        val deletedRealPaths = results.filter { !it.isSymlink && it.deletedFromDb }
+          .map { it.path }.toSet()
+        val deletedAllPaths = results.filter { it.deletedFromDb }.map { it.path }.toSet()
+        if (deletedRealPaths.isNotEmpty()) {
+          anyRealFolderDeleted = true
+        }
+
+        val remainingPaths = currentGroup.paths.filter { it !in deletedRealPaths }
+        if (remainingPaths.size >= 2) {
+          val remainingSymlinks = currentGroup.symlinkPaths.filter { sym ->
+            sym.path !in deletedAllPaths &&
+              deletedRealPaths.none { dir -> sym.path.startsWith("$dir/") }
+          }
+          pendingGroups.addFirst(
+            currentGroup.copy(
+              paths = remainingPaths,
+              symlinkPaths = remainingSymlinks
+            )
+          )
         }
       }
     }

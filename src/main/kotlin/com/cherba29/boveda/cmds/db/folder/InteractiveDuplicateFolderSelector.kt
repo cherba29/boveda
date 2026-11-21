@@ -3,6 +3,7 @@ package com.cherba29.boveda.cmds.db.folder
 import com.cherba29.boveda.model.DuplicateFolderGroup
 import com.cherba29.boveda.model.formatBytes
 import com.cherba29.boveda.model.formatBytesShort
+import com.cherba29.boveda.model.formatDisplayPath
 import com.github.ajalt.mordant.animation.animation
 import com.github.ajalt.mordant.input.MouseTracking
 import com.github.ajalt.mordant.input.enterRawMode
@@ -13,13 +14,15 @@ import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.rendering.TextStyles.dim
 import com.github.ajalt.mordant.terminal.Terminal
 import com.github.ajalt.mordant.widgets.Text
+import java.io.File
 
 /**
  * Interactive selector for choosing 100% matching duplicate folders to delete from the terminal.
  * Supports arrow key navigation, multi-selection toggling, and escape cancellation.
  */
 class InteractiveDuplicateFolderSelector(
-  private val terminal: Terminal = Terminal()
+  private val terminal: Terminal = Terminal(),
+  private val pathSeparator: Char = File.separatorChar
 ) {
 
   private data class SelectableItem(
@@ -28,13 +31,19 @@ class InteractiveDuplicateFolderSelector(
   )
 
   private fun buildItems(group: DuplicateFolderGroup): List<SelectableItem> =
-    group.paths.map { path -> SelectableItem(path = path, displayLabel = path) } +
-      group.symlinkPaths.map { sym ->
-        SelectableItem(
-          path = sym.path,
-          displayLabel = "${sym.path} [symlink -> ${sym.target}]"
-        )
-      }
+    group.paths.map { path ->
+      SelectableItem(
+        path = path,
+        displayLabel = formatDisplayPath(path, pathSeparator)
+      )
+    } + group.symlinkPaths.map { sym ->
+      val symPath = formatDisplayPath(sym.path, pathSeparator)
+      val symTarget = formatDisplayPath(sym.target, pathSeparator)
+      SelectableItem(
+        path = sym.path,
+        displayLabel = "$symPath [symlink -> $symTarget]"
+      )
+    }
 
   /**
    * Prompts the user to select one or more identical folders (or symlinks) from [group] to delete.

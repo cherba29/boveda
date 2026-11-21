@@ -2,6 +2,7 @@ package com.cherba29.boveda.cmds.db.file
 
 import com.cherba29.boveda.model.DuplicateGroup
 import com.cherba29.boveda.model.formatBytes
+import com.cherba29.boveda.model.formatDisplayPath
 import com.github.ajalt.mordant.animation.animation
 import com.github.ajalt.mordant.input.MouseTracking
 import com.github.ajalt.mordant.input.enterRawMode
@@ -12,13 +13,15 @@ import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.rendering.TextStyles.dim
 import com.github.ajalt.mordant.terminal.Terminal
 import com.github.ajalt.mordant.widgets.Text
+import java.io.File
 
 /**
  * Interactive selector for choosing duplicate files to delete from the terminal.
  * Supports arrow key navigation, multi-selection toggling, and escape cancellation.
  */
 class InteractiveDuplicateSelector(
-  private val terminal: Terminal = Terminal()
+  private val terminal: Terminal = Terminal(),
+  private val pathSeparator: Char = File.separatorChar
 ) {
 
   private data class SelectableItem(
@@ -26,14 +29,23 @@ class InteractiveDuplicateSelector(
     val displayLabel: String
   )
 
-  private fun buildItems(group: DuplicateGroup): List<SelectableItem> =
-    group.paths.map { path -> SelectableItem(path = path, displayLabel = path) } +
-      group.symlinkPaths.map { sym ->
-        SelectableItem(
-          path = sym.path,
-          displayLabel = "${sym.path} [symlink -> ${sym.target}]"
-        )
-      }
+  private fun buildItems(group: DuplicateGroup): List<SelectableItem> {
+    val fileItems = group.paths.map { path ->
+      SelectableItem(
+        path = path,
+        displayLabel = formatDisplayPath(path, pathSeparator)
+      )
+    }
+    val symlinkItems = group.symlinkPaths.map { sym ->
+      val symPath = formatDisplayPath(sym.path, pathSeparator)
+      val symTarget = formatDisplayPath(sym.target, pathSeparator)
+      SelectableItem(
+        path = sym.path,
+        displayLabel = "$symPath [symlink -> $symTarget]"
+      )
+    }
+    return fileItems + symlinkItems
+  }
 
   /**
    * Prompts the user to select one or more duplicate files (or symlinks) from [group] to delete.
