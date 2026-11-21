@@ -313,4 +313,53 @@ class DuplicateStatisticsTest {
     assertEquals(800L, bucket.totalDuplicateBytes)
     assertEquals(600L, bucket.wastedBytes)
   }
+
+  @Test
+  fun `computeDuplicateStatistics handles completely empty snapshot and zero-byte duplicates`() {
+    val (service, _) = createService()
+
+    // Completely empty snapshot (0 files)
+    val emptySnap = service.createSnapshot(Paths.get("/truly-empty"))
+    val emptyStats = service.computeDuplicateStatistics(emptySnap.id.value, 10.milliseconds)
+    assertEquals(0L, emptyStats.totalFilesScanned)
+    assertEquals(0L, emptyStats.totalScannedBytes)
+    assertEquals(0L, emptyStats.distinctFiles)
+    assertEquals(0L, emptyStats.distinctBytes)
+    assertEquals(0L, emptyStats.duplicateGroupsCount)
+    assertEquals(0L, emptyStats.duplicateFileCount)
+    assertEquals(10, emptyStats.percentileBuckets.size)
+
+    // Zero-byte duplicate files
+    val zeroSnap = service.createSnapshot(Paths.get("/zeros"))
+    service.recordFile(zeroSnap, ScannedFile(Paths.get("z1.txt"), "z1.txt", 0L, "empty_hash"))
+    service.recordFile(zeroSnap, ScannedFile(Paths.get("z2.txt"), "z2.txt", 0L, "empty_hash"))
+    val zeroStats = service.computeDuplicateStatistics(zeroSnap.id.value, 10.milliseconds)
+    assertEquals(2L, zeroStats.totalFilesScanned)
+    assertEquals(1L, zeroStats.duplicateGroupsCount)
+    assertEquals(2L, zeroStats.duplicateFileCount)
+    assertEquals(0L, zeroStats.wastedBytes)
+    assertEquals(0.0, zeroStats.wastedPercentage)
+    assertEquals(1, zeroStats.largestDuplicates.size)
+    assertEquals(2, zeroStats.largestDuplicates[0].paths.size)
+  }
+
+  @Test
+  fun `forEachDuplicate streams only duplicates for specified snapshot`() {
+    val (service, _) = createService()
+    val snap1 = service.createSnapshot(Paths.get("/s1"))
+    val snap2 = service.createSnapshot(Paths.get("/s2"))
+
+    service.recordFile(snap1, ScannedFile(Paths.get("/s1/a.txt"), "a.txt", 100L, "dup1"))
+    service.recordFile(snap1, ScannedFile(Paths.get("/s1/b.txt"), "b.txt", 100L, "dup1"))
+    service.recordFile(snap1, ScannedFile(Paths.get("/s1/u.txt"), "u.txt", 200L, "uniq1"))
+    service.recordFile(snap2, ScannedFile(Paths.get("/s2/c.txt"), "c.txt", 300L, "dup2"))
+    service.recordFile(snap2, ScannedFile(Paths.get("/s2/d.txt"), "d.txt", 300L, "dup2"))
+
+    val streamed = mutableListOf<String>()
+    val count = service.forEachDuplicate(snap1.id.value) { rec ->
+      streamed.add("${rec.path}#${rec.duplicateRank}")
+    }
+    assertEquals(2L, count)
+    assertEquals(listOf("/s1/a.txt#1", "/s1/b.txt#2"), streamed)
+  }
 }

@@ -85,25 +85,27 @@ class PrintDuplicatesCommand(
       return
     }
 
-    val duplicates = service.findDuplicates(snapshot.id.value)
-    if (duplicates.isEmpty()) {
-      if (verbose) {
-        echo("### ==== Duplicate Files in DB ==== ###")
-      }
-      echo("No duplicates found.")
-    } else if (verbose) {
+    if (verbose) {
       echo("### ==== Duplicate Files in DB ==== ###")
-      duplicates.forEach { record ->
+      val duplicateCount = service.forEachDuplicate(snapshot.id.value) { record ->
         echo(
           "snapshot=${record.snapshotId} size=${record.size} " +
             "path=${record.path} rank=${record.duplicateRank} hash=${record.hash}"
         )
       }
+      if (duplicateCount == 0L) {
+        echo("No duplicates found.")
+      }
     }
 
-    val elapsedNanos = System.nanoTime() - startTime
-    val duration = elapsedNanos.nanoseconds
-    val stats = service.computeDuplicateStatistics(snapshot.id.value, duration)
+    val rawStats = service.computeDuplicateStatistics(
+      snapshot.id.value,
+      kotlin.time.Duration.ZERO
+    )
+    val stats = rawStats.copy(processingDuration = (System.nanoTime() - startTime).nanoseconds)
+    if (!verbose && stats.duplicateGroupsCount == 0L) {
+      echo("No duplicates found.")
+    }
     service.printDuplicateStatistics(stats) { echo(it) }
   }
 }
